@@ -246,25 +246,48 @@ if page == "数据管理":
                             
                             if 'station' in original_df.columns:
                                 same_station_mask = original_df['station'] == station_val
-                                if 'time' in original_df.columns:
-                                    time_window = pd.Timedelta(hours=2)
-                                    row_time = pd.to_datetime(row['time'])
-                                    time_mask = (pd.to_datetime(original_df['time']) >= row_time - time_window) & \
-                                               (pd.to_datetime(original_df['time']) <= row_time + time_window)
-                                    segment_mask = same_station_mask & time_mask
-                                else:
-                                    segment_mask = same_station_mask
+                                station_data = original_df[same_station_mask]
                             else:
-                                segment_mask = pd.Series([True] * len(original_df))
+                                station_data = original_df
                             
-                            segment_data = original_df[segment_mask]
+                            if 'time' in original_df.columns and len(station_data) > 10:
+                                time_diffs = pd.to_datetime(station_data['time']).diff().dropna()
+                                if len(time_diffs) > 0:
+                                    median_interval = time_diffs.median()
+                                    if median_interval <= pd.Timedelta(hours=6):
+                                        time_window = pd.Timedelta(hours=12)
+                                    elif median_interval <= pd.Timedelta(days=1):
+                                        time_window = pd.Timedelta(days=3)
+                                    else:
+                                        time_window = pd.Timedelta(days=7)
+                                    
+                                    row_time = pd.to_datetime(row['time'])
+                                    time_mask = (pd.to_datetime(station_data['time']) >= row_time - time_window) & \
+                                               (pd.to_datetime(station_data['time']) <= row_time + time_window)
+                                    segment_data = station_data[time_mask]
+                                    
+                                    if len(segment_data) < 5:
+                                        segment_data = station_data
+                                else:
+                                    segment_data = station_data
+                            else:
+                                segment_data = station_data
                             
                             correlations = {}
                             for other_comp in other_cols:
-                                if segment_data[[comp, other_comp]].notna().all(axis=1).sum() >= 3:
-                                    corr = segment_data[comp].corr(segment_data[other_comp])
+                                valid_data = segment_data[[comp, other_comp]].dropna()
+                                if len(valid_data) >= 5:
+                                    corr = valid_data[comp].corr(valid_data[other_comp])
                                     if not pd.isna(corr):
                                         correlations[other_comp] = corr
+                            
+                            if not correlations and len(station_data) > len(segment_data):
+                                for other_comp in other_cols:
+                                    valid_data = station_data[[comp, other_comp]].dropna()
+                                    if len(valid_data) >= 5:
+                                        corr = valid_data[comp].corr(valid_data[other_comp])
+                                        if not pd.isna(corr):
+                                            correlations[other_comp] = corr
                             
                             sorted_corrs = sorted(correlations.items(), key=lambda x: abs(x[1]), reverse=True)
                             top3 = sorted_corrs[:3]
@@ -1298,6 +1321,7 @@ elif page == "交叉验证":
 
                     results = {}
                     source_names_map = {}
+                    profiles_map = {}
 
                     for algo in selected_algorithms:
                         if algo == "PMF":
@@ -1315,6 +1339,7 @@ elif page == "交叉验证":
                                 'G': result.G,
                             }
                             source_names_map[algo] = result.source_names
+                            profiles_map[algo] = result.F.copy()
 
                         elif algo == "CMB":
                             if len(selected_sources_cv) == 0:
@@ -1337,6 +1362,7 @@ elif page == "交叉验证":
                                 'G': valid_contrib,
                             }
                             source_names_map[algo] = result.source_names
+                            profiles_map[algo] = source_matrix.T.copy()
 
                         elif algo == "PCA-MLR":
                             total_mass = np.sum(X_valid, axis=1)
@@ -1355,12 +1381,66 @@ elif page == "交叉验证":
                                 'G': np.abs(result.source_contributions),
                             }
                             source_names_map[algo] = result.source_names
+                            profiles_map[algo] = result.loadings.T.copy()
+
+                    def match_sources_by_profile(profiles_a, names_a, profiles_b, names_b):
+                        n_a = len(names_a)
+                        n_b = len(names_b)
+                        
+                        corr_matrix = np.zeros((n_a, n_b))
+                        for i in range(n_a):
+                            for j in range(n_b):
+                                if np.std(profiles_a[i]) > 0 and np.std(profiles_b[j]) > 0:
+                                    corr = np.corrcoef(profiles_a[i], profiles_b[j])[0, 1]
+                                    corr_matrix[i, j] = abs(corr)
+                                else:
+                                    corr_matrix[i, j] = 0
+                        
+                        matched_pairs = []
+                        used_a = set()
+                        used_b = set()
+                        
+                        while len(matched_pairs) < min(n_a, n_b):
+                            max_corr = -1
+                            best_i, best_j = -1, -1
+                            for i in range(n_a):
+                                if i in used_a:
+                                    continue
+                                for j in range(n_b):
+                                    if j in used_b:
+                                        continue
+                                    if corr_matrix[i, j] > max_corr:
+                                        max_corr = corr_matrix[i, j]
+                                        best_i, best_j = i, j
+                            
+                            if max_corr < 0.3 or best_i < 0 or best_j < 0:
+                                break
+                            
+                            matched_pairs.append((names_a[best_i], names_b[best_j], max_corr))
+                            used_a.add(best_i)
+                            used_b.add(best_j)
+                        
+                        return matched_pairs
+
+                    source_mappings = {}
+                    algo_list = list(selected_algorithms)
+                    for i in range(len(algo_list)):
+                        for j in range(i + 1, len(algo_list)):
+                            algo_a = algo_list[i]
+                            algo_b = algo_list[j]
+                            pairs = match_sources_by_profile(
+                                profiles_map[algo_a], source_names_map[algo_a],
+                                profiles_map[algo_b], source_names_map[algo_b],
+                            )
+                            source_mappings[(algo_a, algo_b)] = pairs
 
                     if len(results) == len(selected_algorithms):
                         st.session_state.cross_validation_results = {
                             'results': results,
                             'source_names_map': source_names_map,
                             'selected_algorithms': selected_algorithms,
+                            'source_mappings': source_mappings,
+                            'profiles_map': profiles_map,
                         }
                         st.success("交叉验证完成！")
 
@@ -1370,6 +1450,7 @@ elif page == "交叉验证":
                 selected_algorithms = cv_data['selected_algorithms']
                 results = cv_data['results']
                 source_names_map = cv_data['source_names_map']
+                source_mappings = cv_data.get('source_mappings', {})
 
                 viz = st.session_state.visualizer
 
@@ -1388,7 +1469,65 @@ elif page == "交叉验证":
                         common_sources = common_sources & set(sources)
                 common_sources = list(common_sources)
 
-                if len(common_sources) > 0:
+                def get_aligned_contribs_by_mapping(algo_list):
+                    if len(algo_list) < 2:
+                        return [], {}
+                    
+                    if len(algo_list) == 2:
+                        algo_a, algo_b = algo_list
+                        mapping_key = (algo_a, algo_b)
+                        if mapping_key not in source_mappings:
+                            mapping_key = (algo_b, algo_a)
+                        
+                        if mapping_key in source_mappings and len(source_mappings[mapping_key]) > 0:
+                            pairs = source_mappings[mapping_key]
+                            labels = [f"{p[0]}\n↔\n{p[1]}" for p in pairs]
+                            contribs = {algo_a: [], algo_b: []}
+                            for name_a, name_b, _ in pairs:
+                                idx_a = source_names_map[algo_a].index(name_a)
+                                idx_b = source_names_map[algo_b].index(name_b)
+                                contribs[algo_a].append(results[algo_a]['avg_contrib'][idx_a])
+                                contribs[algo_b].append(results[algo_b]['avg_contrib'][idx_b])
+                            return labels, {k: np.array(v) for k, v in contribs.items()}
+                    
+                    if len(common_sources) > 0:
+                        aligned = {}
+                        for algo in algo_list:
+                            sources = source_names_map[algo]
+                            contribs = results[algo]['avg_contrib']
+                            aligned[algo] = np.array([contribs[sources.index(src)] for src in common_sources])
+                        return common_sources, aligned
+                    
+                    return [], {}
+
+                if len(selected_algorithms) == 2:
+                    labels, aligned_contribs = get_aligned_contribs_by_mapping(selected_algorithms)
+                    if len(labels) > 0:
+                        img_buf = viz.algorithm_comparison_bar(
+                            labels,
+                            aligned_contribs,
+                            title="多算法源贡献对比（基于谱图相似性匹配",
+                        )
+                        st.image(img_buf, use_container_width=True)
+                        
+                        with st.expander("查看匹配详情"):
+                            mapping_key = (selected_algorithms[0], selected_algorithms[1])
+                            if mapping_key not in source_mappings:
+                                mapping_key = (selected_algorithms[1], selected_algorithms[0])
+                            if mapping_key in source_mappings:
+                                match_df = pd.DataFrame(source_mappings[mapping_key], columns=[
+                                    selected_algorithms[0], selected_algorithms[1], "相似系数"
+                                ])
+                                st.dataframe(match_df.round(4), use_container_width=True)
+                    else:
+                        for algo in selected_algorithms:
+                            img_buf = viz.algorithm_comparison_bar(
+                                source_names_map[algo],
+                                {algo: results[algo]['avg_contrib']},
+                                title=f"{algo} 源贡献",
+                            )
+                            st.image(img_buf, use_container_width=True)
+                elif len(common_sources) > 0:
                     aligned_results = {}
                     for algo in selected_algorithms:
                         sources = source_names_map[algo]
@@ -1425,34 +1564,98 @@ elif page == "交叉验证":
 
                             col_a, col_b = st.columns([3, 2])
 
+                            mapping_key = (algo_a, algo_b)
+                            if mapping_key not in source_mappings:
+                                mapping_key = (algo_b, algo_a)
+                            
+                            pairs = source_mappings.get(mapping_key, [])
+                            
                             with col_a:
-                                common_ab = list(set(source_names_map[algo_a]) & set(source_names_map[algo_b]))
-                                if len(common_ab) > 0:
+                                if len(pairs) >= 2:
                                     contribs_a = []
                                     contribs_b = []
-                                    for src in common_ab:
-                                        idx_a = source_names_map[algo_a].index(src)
-                                        idx_b = source_names_map[algo_b].index(src)
+                                    scatter_labels = []
+                                    for name_a, name_b, corr_val in pairs:
+                                        idx_a = source_names_map[algo_a].index(name_a)
+                                        idx_b = source_names_map[algo_b].index(name_b)
                                         contribs_a.append(results[algo_a]['avg_contrib'][idx_a])
                                         contribs_b.append(results[algo_b]['avg_contrib'][idx_b])
+                                        scatter_labels.append(f"{name_a}\n({name_b})")
                                     contribs_a = np.array(contribs_a)
                                     contribs_b = np.array(contribs_b)
 
                                     img_buf = viz.algorithm_scatter_comparison(
                                         contribs_a,
                                         contribs_b,
-                                        common_ab,
+                                        [p[0] for p in pairs],
                                         label_a=algo_a,
                                         label_b=algo_b,
-                                        title=f"{algo_a} vs {algo_b}",
+                                        title=f"{algo_a} vs {algo_b}（基于谱图匹配）",
                                     )
                                     st.image(img_buf, use_container_width=True)
                                 else:
-                                    st.info(f"{algo_a} 和 {algo_b} 没有共同的源类，无法绘制散点图")
+                                    common_ab = list(set(source_names_map[algo_a]) & set(source_names_map[algo_b]))
+                                    if len(common_ab) > 0:
+                                        contribs_a = []
+                                        contribs_b = []
+                                        for src in common_ab:
+                                            idx_a = source_names_map[algo_a].index(src)
+                                            idx_b = source_names_map[algo_b].index(src)
+                                            contribs_a.append(results[algo_a]['avg_contrib'][idx_a])
+                                            contribs_b.append(results[algo_b]['avg_contrib'][idx_b])
+                                        contribs_a = np.array(contribs_a)
+                                        contribs_b = np.array(contribs_b)
+
+                                        img_buf = viz.algorithm_scatter_comparison(
+                                            contribs_a,
+                                            contribs_b,
+                                            common_ab,
+                                            label_a=algo_a,
+                                            label_b=algo_b,
+                                            title=f"{algo_a} vs {algo_b}",
+                                        )
+                                        st.image(img_buf, use_container_width=True)
+                                    else:
+                                        st.info(f"{algo_a} 和 {algo_b} 无法匹配源类，无法绘制散点图")
 
                             with col_b:
                                 st.markdown(f"**{algo_a} vs {algo_b}**")
-                                if len(common_ab) >= 2:
+                                if len(pairs) >= 2:
+                                    contribs_a = []
+                                    contribs_b = []
+                                    for name_a, name_b, _ in pairs:
+                                        idx_a = source_names_map[algo_a].index(name_a)
+                                        idx_b = source_names_map[algo_b].index(name_b)
+                                        contribs_a.append(results[algo_a]['avg_contrib'][idx_a])
+                                        contribs_b.append(results[algo_b]['avg_contrib'][idx_b])
+                                    contribs_a = np.array(contribs_a)
+                                    contribs_b = np.array(contribs_b)
+                                    
+                                    total_a = np.sum(contribs_a)
+                                    total_b = np.sum(contribs_b)
+                                    pct_a = contribs_a / total_a * 100 if total_a > 0 else contribs_a
+                                    pct_b = contribs_b / total_b * 100 if total_b > 0 else contribs_b
+
+                                    corr = np.corrcoef(pct_a, pct_b)[0, 1]
+                                    rmse = np.sqrt(np.mean((pct_a - pct_b) ** 2))
+
+                                    st.metric("相关系数", f"{corr:.4f}")
+                                    st.metric("均方根差 (%)", f"{rmse:.2f}")
+                                    mean_diff = np.mean(np.abs(pct_a - pct_b))
+                                    st.metric("平均绝对差 (%)", f"{mean_diff:.2f}")
+
+                                    avg_sim = np.mean([p[2] for p in pairs])
+                                    st.metric("平均谱图相似度", f"{avg_sim:.3f}")
+
+                                    if corr >= 0.9:
+                                        st.success("✅ 算法一致性极好")
+                                    elif corr >= 0.7:
+                                        st.info("ℹ️ 算法一致性良好")
+                                    elif corr >= 0.5:
+                                        st.warning("⚠️ 算法一致性一般")
+                                    else:
+                                        st.error("❌ 算法一致性较差")
+                                elif len(common_ab) >= 2:
                                     total_a = np.sum(contribs_a)
                                     total_b = np.sum(contribs_b)
                                     pct_a = contribs_a / total_a * 100 if total_a > 0 else contribs_a
