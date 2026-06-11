@@ -369,3 +369,208 @@ class Visualizer:
         plt.tight_layout()
 
         return self._fig_to_bytes(fig)
+
+    def sensitivity_heatmap(
+        self,
+        component_names: List[str],
+        source_names: List[str],
+        sensitivity_matrix: np.ndarray,
+        title: str = "源谱灵敏度分析",
+        high_threshold: float = 15.0,
+    ) -> BytesIO:
+        fig, ax = plt.subplots(figsize=(max(8, len(source_names) * 1.2), max(6, len(component_names) * 0.5)))
+
+        vmax = max(abs(sensitivity_matrix.min()), abs(sensitivity_matrix.max()))
+        vmax = max(vmax, high_threshold)
+
+        cmap = plt.cm.RdBu_r
+        bounds = np.linspace(-vmax, vmax, 101)
+        norm = mcolors.BoundaryNorm(bounds, cmap.N)
+
+        im = ax.imshow(
+            sensitivity_matrix,
+            cmap=cmap,
+            norm=norm,
+            aspect='auto',
+            interpolation='nearest',
+        )
+
+        for i in range(len(component_names)):
+            for j in range(len(source_names)):
+                val = sensitivity_matrix[i, j]
+                text_color = 'white' if abs(val) > high_threshold / 2 else 'black'
+                font_weight = 'bold' if abs(val) > high_threshold else 'normal'
+                ax.text(
+                    j, i, f'{val:.1f}%',
+                    ha='center', va='center',
+                    color=text_color,
+                    fontweight=font_weight,
+                    fontsize=8,
+                )
+
+        ax.set_xticks(range(len(source_names)))
+        ax.set_xticklabels(source_names, rotation=45, ha='right', fontsize=9)
+        ax.set_yticks(range(len(component_names)))
+        ax.set_yticklabels(component_names, fontsize=9)
+        ax.set_xlabel('源类', fontsize=11)
+        ax.set_ylabel('组分', fontsize=11)
+        ax.set_title(title, fontsize=13, fontweight='bold')
+
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label('贡献变化百分比 (%)', fontsize=10)
+
+        high_mask = np.abs(sensitivity_matrix) > high_threshold
+        if np.any(high_mask):
+            for i, j in zip(*np.where(high_mask)):
+                rect = plt.Rectangle(
+                    (j - 0.5, i - 0.5), 1, 1,
+                    fill=False, edgecolor='black', linewidth=2,
+                )
+                ax.add_patch(rect)
+
+        plt.tight_layout()
+        return self._fig_to_bytes(fig)
+
+    def algorithm_comparison_bar(
+        self,
+        source_names: List[str],
+        algorithm_results: Dict[str, np.ndarray],
+        title: str = "多算法源贡献对比",
+        ylabel: str = "贡献占比 (%)",
+    ) -> BytesIO:
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        n_sources = len(source_names)
+        n_algorithms = len(algorithm_results)
+        width = 0.8 / n_algorithms
+
+        algo_names = list(algorithm_results.keys())
+        colors = COLORS[:n_algorithms]
+
+        x = np.arange(n_sources)
+
+        for i, (name, contribs) in enumerate(algorithm_results.items()):
+            total = np.sum(contribs)
+            percentages = contribs / total * 100 if total > 0 else contribs
+            offset = (i - n_algorithms / 2 + 0.5) * width
+            ax.bar(x + offset, percentages, width, label=name, color=colors[i], alpha=0.85)
+
+        ax.set_xlabel('源类', fontsize=12)
+        ax.set_ylabel(ylabel, fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels(source_names, rotation=45, ha='right')
+        ax.legend(fontsize=10)
+        ax.grid(True, alpha=0.3, axis='y')
+
+        plt.tight_layout()
+        return self._fig_to_bytes(fig)
+
+    def algorithm_scatter_comparison(
+        self,
+        contribs_a: np.ndarray,
+        contribs_b: np.ndarray,
+        source_names: List[str],
+        label_a: str = "算法A",
+        label_b: str = "算法B",
+        title: str = "算法结果对比",
+    ) -> BytesIO:
+        fig, ax = plt.subplots(figsize=(8, 8))
+
+        total_a = np.sum(contribs_a)
+        total_b = np.sum(contribs_b)
+        pct_a = contribs_a / total_a * 100 if total_a > 0 else contribs_a
+        pct_b = contribs_b / total_b * 100 if total_b > 0 else contribs_b
+
+        max_val = max(pct_a.max(), pct_b.max()) * 1.1
+        min_val = 0
+
+        colors = COLORS[:len(source_names)]
+        for i, (name, pa, pb) in enumerate(zip(source_names, pct_a, pct_b)):
+            ax.scatter(pa, pb, s=100, color=colors[i], label=name, alpha=0.8, edgecolors='black', linewidth=0.5)
+            ax.annotate(name, (pa, pb), xytext=(5, 5), textcoords='offset points', fontsize=9)
+
+        ax.plot([min_val, max_val], [min_val, max_val], 'k--', label='45°线', linewidth=1.5, alpha=0.7)
+
+        ax.set_xlabel(f'{label_a} 贡献占比 (%)', fontsize=12)
+        ax.set_ylabel(f'{label_b} 贡献占比 (%)', fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=9)
+        ax.grid(True, alpha=0.3)
+        ax.set_aspect('equal')
+        ax.set_xlim(min_val, max_val)
+        ax.set_ylim(min_val, max_val)
+
+        plt.tight_layout()
+        return self._fig_to_bytes(fig)
+
+    def trend_alert_plot(
+        self,
+        times: pd.DatetimeIndex,
+        contributions: np.ndarray,
+        source_names: List[str],
+        alert_indices: Optional[List[int]] = None,
+        alert_sources: Optional[List[str]] = None,
+        title: str = "源贡献时间趋势与预警",
+        ylabel: str = "浓度 (μg/m³)",
+    ) -> BytesIO:
+        fig, ax = plt.subplots(figsize=(12, 6))
+        colors = COLORS[:len(source_names)]
+
+        for i, (name, color) in enumerate(zip(source_names, colors)):
+            linewidth = 2
+            alpha = 0.8
+            if alert_sources and name in alert_sources:
+                linewidth = 3
+                alpha = 1.0
+            ax.plot(times, contributions[:, i], label=name, color=color, linewidth=linewidth, alpha=alpha)
+
+        if alert_indices is not None and len(alert_indices) > 0:
+            for idx in alert_indices:
+                if idx < len(times):
+                    ax.axvline(x=times[idx], color='red', linestyle='--', alpha=0.5, linewidth=1)
+                    ax.scatter(times[idx], contributions[idx, :].max(), color='red', s=150, zorder=5, marker='*', edgecolors='black', linewidth=0.5)
+
+        ax.set_xlabel('时间', fontsize=12)
+        ax.set_ylabel(ylabel, fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize=10)
+        ax.grid(True, alpha=0.3)
+        fig.autofmt_xdate()
+        plt.tight_layout()
+        return self._fig_to_bytes(fig)
+
+    def anomaly_correlation_bars(
+        self,
+        component_name: str,
+        correlated_components: List[str],
+        correlation_values: List[float],
+        title: str = "异常组分关联分析",
+    ) -> BytesIO:
+        fig, ax = plt.subplots(figsize=(8, 5))
+
+        colors = ['#ff6b6b' if abs(r) > 0.7 else '#4ecdc4' if abs(r) > 0.5 else '#45b7d1' for r in correlation_values]
+
+        bars = ax.barh(range(len(correlated_components)), correlation_values, color=colors, alpha=0.85)
+        ax.set_yticks(range(len(correlated_components)))
+        ax.set_yticklabels(correlated_components, fontsize=10)
+        ax.set_xlabel('相关系数', fontsize=11)
+        ax.set_title(f'{component_name} - 关联组分', fontsize=13, fontweight='bold')
+        ax.axvline(x=0, color='k', linestyle='-', linewidth=0.5)
+        ax.axvline(x=0.7, color='red', linestyle='--', alpha=0.5, label='强相关 (|r|>0.7)')
+        ax.axvline(x=-0.7, color='red', linestyle='--', alpha=0.5)
+        ax.set_xlim(-1.1, 1.1)
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3, axis='x')
+
+        for bar, val in zip(bars, correlation_values):
+            width = bar.get_width()
+            ax.text(width + 0.02 if width >= 0 else width - 0.02,
+                    bar.get_y() + bar.get_height() / 2,
+                    f'{val:.2f}',
+                    va='center',
+                    ha='left' if width >= 0 else 'right',
+                    fontsize=9)
+
+        plt.tight_layout()
+        return self._fig_to_bytes(fig)

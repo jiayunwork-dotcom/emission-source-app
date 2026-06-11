@@ -76,6 +76,19 @@ if 'cwt_result' not in st.session_state:
     st.session_state.cwt_result = None
 if 'visualizer' not in st.session_state:
     st.session_state.visualizer = Visualizer()
+if 'alert_history' not in st.session_state:
+    st.session_state.alert_history = []
+if 'alert_config' not in st.session_state:
+    st.session_state.alert_config = {
+        'consecutive_days': 3,
+        'growth_threshold': 20.0,
+    }
+if 'sensitivity_result' not in st.session_state:
+    st.session_state.sensitivity_result = None
+if 'cross_validation_results' not in st.session_state:
+    st.session_state.cross_validation_results = None
+if 'anomaly_traceability' not in st.session_state:
+    st.session_state.anomaly_traceability = None
 
 
 st.sidebar.title("🌫️ 工业废气排放源解析系统")
@@ -87,6 +100,7 @@ page = st.sidebar.radio(
         "数据管理",
         "源谱库管理",
         "源解析分析",
+        "交叉验证",
         "后向轨迹与潜在源区",
         "多站点对比",
         "报告导出",
@@ -184,6 +198,7 @@ if page == "数据管理":
         component_cols = [col for col in df.columns if col not in ['time', 'station', 'season']]
         st.session_state.component_cols = component_cols
 
+        original_df = df.copy()
         checker = DataQualityChecker(outlier_threshold=outlier_threshold)
         cleaned_df, qc_report = checker.check(df, component_cols)
         st.session_state.data_df = cleaned_df
@@ -203,6 +218,98 @@ if page == "数据管理":
                 '异常高值': [qc_report['outliers'].get(c, 0) for c in component_cols],
             })
             st.dataframe(qc_details, use_container_width=True)
+
+        with st.expander("🔍 异常溯源", expanded=False):
+            st.markdown('<p class="section-header">异常数据溯源分析</p>', unsafe_allow_html=True)
+            
+            total_outliers = sum(qc_report['outliers'].values())
+            if total_outliers == 0:
+                st.info("未检测到异常高值数据点")
+            else:
+                st.info(f"检测到 {total_outliers} 个异常高值数据点，正在进行关联分析...")
+                
+                anomaly_results = []
+                for comp in component_cols:
+                    outlier_count = qc_report['outliers'].get(comp, 0)
+                    if outlier_count > 0:
+                        valid_data = original_df[comp].dropna()
+                        mean_val = valid_data.mean()
+                        outlier_mask = original_df[comp] > mean_val * outlier_threshold
+                        outlier_indices = original_df[outlier_mask].index.tolist()
+                        
+                        for idx in outlier_indices[:5]:
+                            row = original_df.loc[idx]
+                            time_val = row.get('time', 'N/A')
+                            station_val = row.get('station', 'N/A')
+                            
+                            other_cols = [c for c in component_cols if c != comp]
+                            
+                            if 'station' in original_df.columns:
+                                same_station_mask = original_df['station'] == station_val
+                                if 'time' in original_df.columns:
+                                    time_window = pd.Timedelta(hours=2)
+                                    row_time = pd.to_datetime(row['time'])
+                                    time_mask = (pd.to_datetime(original_df['time']) >= row_time - time_window) & \
+                                               (pd.to_datetime(original_df['time']) <= row_time + time_window)
+                                    segment_mask = same_station_mask & time_mask
+                                else:
+                                    segment_mask = same_station_mask
+                            else:
+                                segment_mask = pd.Series([True] * len(original_df))
+                            
+                            segment_data = original_df[segment_mask]
+                            
+                            correlations = {}
+                            for other_comp in other_cols:
+                                if segment_data[[comp, other_comp]].notna().all(axis=1).sum() >= 3:
+                                    corr = segment_data[comp].corr(segment_data[other_comp])
+                                    if not pd.isna(corr):
+                                        correlations[other_comp] = corr
+                            
+                            sorted_corrs = sorted(correlations.items(), key=lambda x: abs(x[1]), reverse=True)
+                            top3 = sorted_corrs[:3]
+                            
+                            anomaly_results.append({
+                                'component': comp,
+                                'time': time_val,
+                                'station': station_val,
+                                'value': row[comp],
+                                'mean': mean_val,
+                                'ratio': row[comp] / mean_val if mean_val > 0 else 0,
+                                'top_correlations': top3,
+                            })
+                
+                if anomaly_results:
+                    st.session_state.anomaly_traceability = anomaly_results
+                    
+                    for i, anomaly in enumerate(anomaly_results[:10]):
+                        with st.container():
+                            col_a, col_b = st.columns([1, 3])
+                            with col_a:
+                                st.markdown(f"**⚠️ {anomaly['component']}**")
+                                st.caption(f"时间: {anomaly['time']}")
+                                st.caption(f"站点: {anomaly['station']}")
+                                st.caption(f"数值: {anomaly['value']:.2f}")
+                                st.caption(f"超标倍数: {anomaly['ratio']:.1f}x")
+                            
+                            with col_b:
+                                if anomaly['top_correlations']:
+                                    comp_names = [c[0] for c in anomaly['top_correlations']]
+                                    corr_values = [c[1] for c in anomaly['top_correlations']]
+                                    
+                                    viz = st.session_state.visualizer
+                                    img_buf = viz.anomaly_correlation_bars(
+                                        anomaly['component'],
+                                        comp_names,
+                                        corr_values,
+                                    )
+                                    st.image(img_buf, use_container_width=True)
+                                else:
+                                    st.info("无足够数据进行关联分析")
+                        
+                        st.markdown("---")
+                else:
+                    st.info("无法进行异常溯源分析")
 
         st.markdown('---')
         st.markdown('<p class="section-header">不确定度计算</p>', unsafe_allow_html=True)
@@ -335,6 +442,151 @@ elif page == "源谱库管理":
             )
             st.image(img_buf, use_container_width=True)
 
+    st.markdown('---')
+    st.markdown('<p class="section-header">源谱灵敏度分析</p>', unsafe_allow_html=True)
+
+    col_sens1, col_sens2 = st.columns([2, 1])
+
+    with col_sens1:
+        st.info("对选中的源谱各组分逐个做±10%扰动，重新运行CMB解析，观察各源贡献系数的变化幅度。")
+        
+        sensitivity_sources = st.multiselect(
+            "选择要分析的源类",
+            source_names,
+            default=source_names[:4],
+            key='sensitivity_sources',
+        )
+        
+        perturbation_percent = st.slider(
+            "扰动幅度 (%)",
+            min_value=5.0,
+            max_value=20.0,
+            value=10.0,
+            step=1.0,
+            key='perturbation_percent',
+        )
+        
+        high_sensitivity_threshold = st.slider(
+            "高敏阈值 (%)",
+            min_value=5.0,
+            max_value=30.0,
+            value=15.0,
+            step=1.0,
+            key='high_sensitivity_threshold',
+        )
+
+    with col_sens2:
+        st.markdown("**分析设置**")
+        if st.session_state.data_df is None:
+            st.warning("请先在'数据管理'页面导入数据")
+        elif len(sensitivity_sources) < 2:
+            st.warning("请至少选择2个源类")
+        else:
+            if st.button("🔬 开始灵敏度分析", type="primary"):
+                with st.spinner("正在执行源谱灵敏度分析，请稍候..."):
+                    df = st.session_state.data_df
+                    component_cols = st.session_state.component_cols
+                    X = df[component_cols].values
+                    U = st.session_state.uncertainty_matrix
+
+                    valid_mask = ~np.isnan(X).any(axis=1) & ~np.isnan(U).any(axis=1) & (U > 0).all(axis=1)
+                    X_valid = X[valid_mask]
+                    U_valid = U[valid_mask]
+
+                    library = st.session_state.source_library
+                    source_matrix = library.get_source_matrix(sensitivity_sources, component_cols)
+                    source_uncert = library.get_uncertainty_matrix(sensitivity_sources, component_cols)
+
+                    base_solver = CMBSolver(
+                        source_names=sensitivity_sources,
+                        component_names=component_cols,
+                        source_matrix=source_matrix,
+                        source_uncertainty_matrix=source_uncert,
+                    )
+                    base_result = base_solver.solve(X_valid, U_valid)
+                    valid_contrib = base_result.source_contributions[~np.isnan(base_result.source_contributions[:, 0])]
+                    base_avg_contrib = np.mean(valid_contrib, axis=0)
+
+                    n_components = len(component_cols)
+                    n_sources = len(sensitivity_sources)
+                    sensitivity_matrix = np.zeros((n_components, n_sources))
+
+                    for i, comp in enumerate(component_cols):
+                        for direction in [1, -1]:
+                            perturbed_matrix = source_matrix.copy()
+                            perturbation = perturbation_percent / 100.0 * direction
+                            for j in range(n_sources):
+                                if perturbed_matrix[i, j] > 0:
+                                    perturbed_matrix[i, j] *= (1 + perturbation)
+
+                            perturbed_solver = CMBSolver(
+                                source_names=sensitivity_sources,
+                                component_names=component_cols,
+                                source_matrix=perturbed_matrix,
+                                source_uncertainty_matrix=source_uncert,
+                            )
+                            perturbed_result = perturbed_solver.solve(X_valid, U_valid)
+                            valid_perturbed = perturbed_result.source_contributions[~np.isnan(perturbed_result.source_contributions[:, 0])]
+                            
+                            if len(valid_perturbed) > 0:
+                                perturbed_avg = np.mean(valid_perturbed, axis=0)
+                                for k in range(n_sources):
+                                    if base_avg_contrib[k] > 0:
+                                        change_pct = (perturbed_avg[k] - base_avg_contrib[k]) / base_avg_contrib[k] * 100
+                                        if direction == 1:
+                                            sensitivity_matrix[i, k] = max(sensitivity_matrix[i, k], abs(change_pct))
+                                        else:
+                                            sensitivity_matrix[i, k] = max(sensitivity_matrix[i, k], abs(change_pct))
+
+                    st.session_state.sensitivity_result = {
+                        'sensitivity_matrix': sensitivity_matrix,
+                        'component_names': component_cols,
+                        'source_names': sensitivity_sources,
+                        'base_avg_contrib': base_avg_contrib,
+                        'high_threshold': high_sensitivity_threshold,
+                    }
+                    st.success("灵敏度分析完成！")
+
+    if st.session_state.sensitivity_result is not None:
+        sens_data = st.session_state.sensitivity_result
+        viz = st.session_state.visualizer
+
+        col_result1, col_result2 = st.columns([3, 1])
+
+        with col_result1:
+            img_buf = viz.sensitivity_heatmap(
+                sens_data['component_names'],
+                sens_data['source_names'],
+                sens_data['sensitivity_matrix'],
+                title="源谱灵敏度分析热力图",
+                high_threshold=sens_data['high_threshold'],
+            )
+            st.image(img_buf, use_container_width=True)
+
+        with col_result2:
+            st.markdown("**高敏组分识别**")
+            high_mask = np.abs(sens_data['sensitivity_matrix']) > sens_data['high_threshold']
+            if np.any(high_mask):
+                high_indices = np.where(high_mask)
+                for i, j in zip(*high_indices):
+                    comp = sens_data['component_names'][i]
+                    source = sens_data['source_names'][j]
+                    val = sens_data['sensitivity_matrix'][i, j]
+                    st.markdown(f"⚠️ **{comp}** → **{source}**: {val:.1f}%")
+                
+                st.markdown('---')
+                st.caption("深色边框标记的单元格表示该组分扰动对源贡献影响超过阈值")
+            else:
+                st.success("✅ 未检测到高敏组分，源谱稳定性良好")
+
+        st.markdown('### 详细数据')
+        sens_df = pd.DataFrame(
+            sens_data['sensitivity_matrix'],
+            index=sens_data['component_names'],
+            columns=sens_data['source_names'],
+        )
+        st.dataframe(sens_df.round(2), use_container_width=True)
+
 
 elif page == "源解析分析":
     st.markdown('<p class="main-header">🔬 源解析分析</p>', unsafe_allow_html=True)
@@ -351,6 +603,113 @@ elif page == "源解析分析":
                 ["PMF 正定矩阵因子分解", "CMB 化学质量平衡法", "PCA-MLR 主成分回归"],
                 index=0,
             )
+
+            st.markdown('---')
+            st.markdown('<p class="section-header">预警设置</p>', unsafe_allow_html=True)
+            alert_config = st.session_state.alert_config
+            alert_config['consecutive_days'] = st.slider(
+                "连续增长天数",
+                min_value=2,
+                max_value=7,
+                value=alert_config['consecutive_days'],
+                step=1,
+                help="连续多少天增长触发预警",
+            )
+            alert_config['growth_threshold'] = st.slider(
+                "日增长阈值 (%)",
+                min_value=5.0,
+                max_value=50.0,
+                value=alert_config['growth_threshold'],
+                step=1.0,
+                help="连续每天的环比增长率阈值",
+            )
+            st.session_state.alert_config = alert_config
+
+            if st.button("🔔 检测趋势预警"):
+                if st.session_state.last_result is None:
+                    st.warning("请先运行源解析分析")
+                elif 'time' not in df.columns:
+                    st.warning("数据中无时间列，无法进行趋势分析")
+                else:
+                    with st.spinner("正在进行趋势预警检测..."):
+                        result_info = st.session_state.last_result
+                        result = result_info['result']
+                        
+                        if result_info['type'] == 'PMF':
+                            if hasattr(result, 'valid_mask'):
+                                G_full = np.full((len(df), result.n_factors), np.nan)
+                                G_full[result.valid_mask] = result.G
+                            else:
+                                G_full = result.G
+                            source_names = result.source_names
+                        elif result_info['type'] == 'CMB':
+                            G_full = result.source_contributions
+                            source_names = result.source_names
+                        else:
+                            G_full = result.source_contributions
+                            source_names = result.source_names
+                        
+                        times = pd.to_datetime(df['time'])
+                        daily_contrib = pd.DataFrame(G_full, columns=source_names)
+                        daily_contrib['date'] = times.dt.date
+                        daily_avg = daily_contrib.groupby('date').mean()
+                        
+                        consecutive_days = alert_config['consecutive_days']
+                        growth_threshold = alert_config['growth_threshold'] / 100
+                        
+                        new_alerts = []
+                        alert_sources = set()
+                        alert_indices = []
+                        
+                        for source in source_names:
+                            series = daily_avg[source].dropna()
+                            if len(series) >= consecutive_days + 1:
+                                for i in range(consecutive_days - 1, len(series)):
+                                    consecutive_growth = True
+                                    growth_rates = []
+                                    for j in range(i - consecutive_days + 1, i + 1):
+                                        if j > 0 and series.iloc[j-1] > 0:
+                                            growth_rate = (series.iloc[j] - series.iloc[j-1]) / series.iloc[j-1]
+                                            growth_rates.append(growth_rate)
+                                            if growth_rate < growth_threshold:
+                                                consecutive_growth = False
+                                                break
+                                        elif j > 0:
+                                            consecutive_growth = False
+                                            break
+                                    
+                                    if consecutive_growth and len(growth_rates) == consecutive_days:
+                                        avg_growth = np.mean(growth_rates) * 100
+                                        alert_date = series.index[i]
+                                        new_alerts.append({
+                                            'time': str(alert_date),
+                                            'source': source,
+                                            'growth': avg_growth,
+                                            'consecutive_days': consecutive_days,
+                                        })
+                                        alert_sources.add(source)
+                                        date_idx = np.where(times.dt.date == alert_date)[0]
+                                        if len(date_idx) > 0:
+                                            alert_indices.append(date_idx[0])
+                        
+                        if new_alerts:
+                            for alert in new_alerts:
+                                if alert not in st.session_state.alert_history:
+                                    st.session_state.alert_history.append(alert)
+                            
+                            for alert in new_alerts:
+                                st.error(f"⚠️ 预警：{alert['source']} 连续 {alert['consecutive_days']} 天增长，平均增幅 {alert['growth']:.1f}%，触发时间：{alert['time']}")
+                        else:
+                            st.success("✅ 未检测到持续增长的污染源")
+                        
+                        st.session_state.current_alert_data = {
+                            'times': times,
+                            'contributions': G_full,
+                            'source_names': source_names,
+                            'alert_indices': alert_indices,
+                            'alert_sources': list(alert_sources),
+                            'daily_avg': daily_avg,
+                        }
 
         with col2:
             if "PMF" in algorithm:
@@ -544,8 +903,8 @@ elif page == "源解析分析":
                 else:
                     st.warning("⚠️ 算法未收敛，建议增加迭代次数")
 
-                tab1, tab2, tab3, tab4, tab5 = st.tabs([
-                    "源贡献占比", "时间序列", "因子谱图", "残差分析", "稳定性分析"
+                tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+                    "源贡献占比", "时间序列", "因子谱图", "残差分析", "稳定性分析", "趋势预警"
                 ])
 
                 with tab1:
@@ -638,6 +997,50 @@ elif page == "源解析分析":
                         ])
                         st.dataframe(disp_df, use_container_width=True)
 
+                with tab6:
+                    st.markdown('<p class="section-header">源贡献时间趋势预警</p>', unsafe_allow_html=True)
+                    
+                    if 'current_alert_data' in st.session_state and st.session_state.current_alert_data is not None:
+                        alert_data = st.session_state.current_alert_data
+                        
+                        viz = st.session_state.visualizer
+                        img_buf = viz.trend_alert_plot(
+                            alert_data['times'],
+                            alert_data['contributions'],
+                            alert_data['source_names'],
+                            alert_data['alert_indices'],
+                            alert_data['alert_sources'],
+                            title="源贡献时间趋势与预警标记",
+                        )
+                        st.image(img_buf, use_container_width=True)
+                        
+                        st.markdown("### 日平均贡献趋势")
+                        st.dataframe(alert_data['daily_avg'].round(4), use_container_width=True)
+                    else:
+                        st.info("请点击左侧'检测趋势预警'按钮进行预警分析")
+                    
+                    st.markdown('---')
+                    st.markdown("### 预警历史记录")
+                    if st.session_state.alert_history:
+                        alert_df = pd.DataFrame(st.session_state.alert_history)
+                        alert_df = alert_df.sort_values('time', ascending=False)
+                        st.dataframe(
+                            alert_df[['time', 'source', 'growth', 'consecutive_days']].rename(columns={
+                                'time': '触发时间',
+                                'source': '源类',
+                                'growth': '平均增幅(%)',
+                                'consecutive_days': '连续天数',
+                            }),
+                            use_container_width=True,
+                        )
+                        
+                        if st.button("清空预警历史"):
+                            st.session_state.alert_history = []
+                            st.success("预警历史已清空")
+                            st.rerun()
+                    else:
+                        st.info("暂无预警记录")
+
             elif result_type == 'CMB':
                 col1, col2, col3 = st.columns(3)
                 with col1:
@@ -650,7 +1053,7 @@ elif page == "源解析分析":
                 if result.condition_number > 20:
                     st.warning("⚠️ 条件数较大，源谱可能存在共线性")
 
-                tab1, tab2, tab3 = st.tabs(["源贡献占比", "时间序列", "残差分析"])
+                tab1, tab2, tab3, tab4 = st.tabs(["源贡献占比", "时间序列", "残差分析", "趋势预警"])
 
                 with tab1:
                     contrib_dict = result.get_contribution_dataframe()
@@ -697,6 +1100,50 @@ elif page == "源解析分析":
                     )
                     st.image(img_buf, use_container_width=True)
 
+                with tab4:
+                    st.markdown('<p class="section-header">源贡献时间趋势预警</p>', unsafe_allow_html=True)
+                    
+                    if 'current_alert_data' in st.session_state and st.session_state.current_alert_data is not None:
+                        alert_data = st.session_state.current_alert_data
+                        
+                        viz = st.session_state.visualizer
+                        img_buf = viz.trend_alert_plot(
+                            alert_data['times'],
+                            alert_data['contributions'],
+                            alert_data['source_names'],
+                            alert_data['alert_indices'],
+                            alert_data['alert_sources'],
+                            title="源贡献时间趋势与预警标记",
+                        )
+                        st.image(img_buf, use_container_width=True)
+                        
+                        st.markdown("### 日平均贡献趋势")
+                        st.dataframe(alert_data['daily_avg'].round(4), use_container_width=True)
+                    else:
+                        st.info("请点击左侧'检测趋势预警'按钮进行预警分析")
+                    
+                    st.markdown('---')
+                    st.markdown("### 预警历史记录")
+                    if st.session_state.alert_history:
+                        alert_df = pd.DataFrame(st.session_state.alert_history)
+                        alert_df = alert_df.sort_values('time', ascending=False)
+                        st.dataframe(
+                            alert_df[['time', 'source', 'growth', 'consecutive_days']].rename(columns={
+                                'time': '触发时间',
+                                'source': '源类',
+                                'growth': '平均增幅(%)',
+                                'consecutive_days': '连续天数',
+                            }),
+                            use_container_width=True,
+                        )
+                        
+                        if st.button("清空预警历史"):
+                            st.session_state.alert_history = []
+                            st.success("预警历史已清空")
+                            st.rerun()
+                    else:
+                        st.info("暂无预警记录")
+
             else:
                 col1, col2, col3 = st.columns(3)
                 with col1:
@@ -706,7 +1153,7 @@ elif page == "源解析分析":
                 with col3:
                     st.metric("R²", f"{result.r_squared:.4f}")
 
-                tab1, tab2, tab3 = st.tabs(["源贡献占比", "因子载荷图", "方差解释"])
+                tab1, tab2, tab3, tab4 = st.tabs(["源贡献占比", "因子载荷图", "方差解释", "趋势预警"])
 
                 with tab1:
                     contrib_dict = result.get_contribution_dataframe()
@@ -739,6 +1186,314 @@ elif page == "源解析分析":
                         '累计方差贡献率': result.cumulative_variance * 100,
                     })
                     st.dataframe(var_df, use_container_width=True)
+
+                with tab4:
+                    st.markdown('<p class="section-header">源贡献时间趋势预警</p>', unsafe_allow_html=True)
+                    
+                    if 'current_alert_data' in st.session_state and st.session_state.current_alert_data is not None:
+                        alert_data = st.session_state.current_alert_data
+                        
+                        viz = st.session_state.visualizer
+                        img_buf = viz.trend_alert_plot(
+                            alert_data['times'],
+                            alert_data['contributions'],
+                            alert_data['source_names'],
+                            alert_data['alert_indices'],
+                            alert_data['alert_sources'],
+                            title="源贡献时间趋势与预警标记",
+                        )
+                        st.image(img_buf, use_container_width=True)
+                        
+                        st.markdown("### 日平均贡献趋势")
+                        st.dataframe(alert_data['daily_avg'].round(4), use_container_width=True)
+                    else:
+                        st.info("请点击左侧'检测趋势预警'按钮进行预警分析")
+                    
+                    st.markdown('---')
+                    st.markdown("### 预警历史记录")
+                    if st.session_state.alert_history:
+                        alert_df = pd.DataFrame(st.session_state.alert_history)
+                        alert_df = alert_df.sort_values('time', ascending=False)
+                        st.dataframe(
+                            alert_df[['time', 'source', 'growth', 'consecutive_days']].rename(columns={
+                                'time': '触发时间',
+                                'source': '源类',
+                                'growth': '平均增幅(%)',
+                                'consecutive_days': '连续天数',
+                            }),
+                            use_container_width=True,
+                        )
+                        
+                        if st.button("清空预警历史"):
+                            st.session_state.alert_history = []
+                            st.success("预警历史已清空")
+                            st.rerun()
+                    else:
+                        st.info("暂无预警记录")
+
+
+elif page == "交叉验证":
+    st.markdown('<p class="main-header">🔄 多算法交叉验证</p>', unsafe_allow_html=True)
+
+    if st.session_state.data_df is None or len(st.session_state.component_cols) == 0:
+        st.warning("请先在'数据管理'页面导入并处理数据")
+    else:
+        col1, col2 = st.columns([1, 2])
+
+        with col1:
+            st.markdown('<p class="section-header">算法选择</p>', unsafe_allow_html=True)
+            available_algorithms = ["PMF", "CMB", "PCA-MLR"]
+            selected_algorithms = st.multiselect(
+                "选择2-3种算法进行对比",
+                available_algorithms,
+                default=["PMF", "CMB"],
+                help="选择2或3种算法同时解析同一份数据",
+            )
+
+            if len(selected_algorithms) < 2:
+                st.warning("请至少选择2种算法")
+            elif len(selected_algorithms) > 3:
+                st.warning("最多选择3种算法")
+
+            st.markdown('---')
+            st.markdown('<p class="section-header">参数设置</p>', unsafe_allow_html=True)
+
+            if "PMF" in selected_algorithms:
+                st.markdown("**PMF参数**")
+                n_factors_cv = st.slider("PMF因子数", min_value=2, max_value=10, value=4, key='cv_n_factors')
+
+            if "CMB" in selected_algorithms:
+                st.markdown("**CMB参数**")
+                library_cv = st.session_state.source_library
+                available_sources_cv = library_cv.get_all_names()
+                selected_sources_cv = st.multiselect(
+                    "选择CMB源类",
+                    available_sources_cv,
+                    default=available_sources_cv[:4],
+                    key='cv_cmb_sources',
+                )
+
+            if "PCA-MLR" in selected_algorithms:
+                st.markdown("**PCA-MLR参数**")
+                variance_threshold_cv = st.slider(
+                    "累计方差阈值 (%)",
+                    min_value=60,
+                    max_value=95,
+                    value=80,
+                    step=5,
+                    key='cv_pca_var',
+                )
+                varimax_cv = st.checkbox("使用Varimax旋转", value=True, key='cv_varimax')
+
+            if st.button("▶️ 开始交叉验证", type="primary", disabled=len(selected_algorithms) < 2):
+                with st.spinner("正在执行多算法交叉验证..."):
+                    df = st.session_state.data_df
+                    component_cols = st.session_state.component_cols
+                    X = df[component_cols].values
+                    U = st.session_state.uncertainty_matrix
+
+                    valid_mask = ~np.isnan(X).any(axis=1) & ~np.isnan(U).any(axis=1) & (U > 0).all(axis=1)
+                    X_valid = X[valid_mask]
+                    U_valid = U[valid_mask]
+
+                    results = {}
+                    source_names_map = {}
+
+                    for algo in selected_algorithms:
+                        if algo == "PMF":
+                            solver = PMFSolver(
+                                component_names=component_cols,
+                                n_factors=n_factors_cv,
+                                max_iterations=500,
+                                random_seed=42,
+                            )
+                            result = solver.solve(X_valid, U_valid)
+                            avg_contrib = np.mean(result.G, axis=0)
+                            results[algo] = {
+                                'avg_contrib': avg_contrib,
+                                'source_names': result.source_names,
+                                'G': result.G,
+                            }
+                            source_names_map[algo] = result.source_names
+
+                        elif algo == "CMB":
+                            if len(selected_sources_cv) == 0:
+                                st.error("请为CMB选择至少一个源类")
+                                break
+                            source_matrix = library_cv.get_source_matrix(selected_sources_cv, component_cols)
+                            source_uncert = library_cv.get_uncertainty_matrix(selected_sources_cv, component_cols)
+                            solver = CMBSolver(
+                                source_names=selected_sources_cv,
+                                component_names=component_cols,
+                                source_matrix=source_matrix,
+                                source_uncertainty_matrix=source_uncert,
+                            )
+                            result = solver.solve(X_valid, U_valid)
+                            valid_contrib = result.source_contributions[~np.isnan(result.source_contributions[:, 0])]
+                            avg_contrib = np.mean(valid_contrib, axis=0)
+                            results[algo] = {
+                                'avg_contrib': avg_contrib,
+                                'source_names': result.source_names,
+                                'G': valid_contrib,
+                            }
+                            source_names_map[algo] = result.source_names
+
+                        elif algo == "PCA-MLR":
+                            total_mass = np.sum(X_valid, axis=1)
+                            solver = PCAMLRSolver(
+                                component_names=component_cols,
+                                variance_threshold=variance_threshold_cv / 100,
+                            )
+                            if varimax_cv:
+                                result = solver.solve_with_varimax(X_valid, total_mass)
+                            else:
+                                result = solver.solve(X_valid, total_mass)
+                            avg_contrib = np.mean(np.abs(result.source_contributions), axis=0)
+                            results[algo] = {
+                                'avg_contrib': avg_contrib,
+                                'source_names': result.source_names,
+                                'G': np.abs(result.source_contributions),
+                            }
+                            source_names_map[algo] = result.source_names
+
+                    if len(results) == len(selected_algorithms):
+                        st.session_state.cross_validation_results = {
+                            'results': results,
+                            'source_names_map': source_names_map,
+                            'selected_algorithms': selected_algorithms,
+                        }
+                        st.success("交叉验证完成！")
+
+        with col2:
+            if st.session_state.cross_validation_results is not None:
+                cv_data = st.session_state.cross_validation_results
+                selected_algorithms = cv_data['selected_algorithms']
+                results = cv_data['results']
+                source_names_map = cv_data['source_names_map']
+
+                viz = st.session_state.visualizer
+
+                st.markdown('<p class="section-header">解析结果对比</p>', unsafe_allow_html=True)
+
+                algo_results = {}
+                for algo in selected_algorithms:
+                    algo_results[algo] = results[algo]['avg_contrib']
+
+                common_sources = None
+                for algo in selected_algorithms:
+                    sources = source_names_map[algo]
+                    if common_sources is None:
+                        common_sources = set(sources)
+                    else:
+                        common_sources = common_sources & set(sources)
+                common_sources = list(common_sources)
+
+                if len(common_sources) > 0:
+                    aligned_results = {}
+                    for algo in selected_algorithms:
+                        sources = source_names_map[algo]
+                        contribs = results[algo]['avg_contrib']
+                        aligned = []
+                        for src in common_sources:
+                            idx = sources.index(src)
+                            aligned.append(contribs[idx])
+                        aligned_results[algo] = np.array(aligned)
+
+                    img_buf = viz.algorithm_comparison_bar(
+                        common_sources,
+                        aligned_results,
+                        title="多算法源贡献对比",
+                    )
+                    st.image(img_buf, use_container_width=True)
+                else:
+                    for algo in selected_algorithms:
+                        img_buf = viz.algorithm_comparison_bar(
+                            source_names_map[algo],
+                            {algo: results[algo]['avg_contrib']},
+                            title=f"{algo} 源贡献",
+                        )
+                        st.image(img_buf, use_container_width=True)
+
+                st.markdown('---')
+                st.markdown('<p class="section-header">算法一致性分析</p>', unsafe_allow_html=True)
+
+                if len(selected_algorithms) >= 2:
+                    for i in range(len(selected_algorithms)):
+                        for j in range(i + 1, len(selected_algorithms)):
+                            algo_a = selected_algorithms[i]
+                            algo_b = selected_algorithms[j]
+
+                            col_a, col_b = st.columns([3, 2])
+
+                            with col_a:
+                                common_ab = list(set(source_names_map[algo_a]) & set(source_names_map[algo_b]))
+                                if len(common_ab) > 0:
+                                    contribs_a = []
+                                    contribs_b = []
+                                    for src in common_ab:
+                                        idx_a = source_names_map[algo_a].index(src)
+                                        idx_b = source_names_map[algo_b].index(src)
+                                        contribs_a.append(results[algo_a]['avg_contrib'][idx_a])
+                                        contribs_b.append(results[algo_b]['avg_contrib'][idx_b])
+                                    contribs_a = np.array(contribs_a)
+                                    contribs_b = np.array(contribs_b)
+
+                                    img_buf = viz.algorithm_scatter_comparison(
+                                        contribs_a,
+                                        contribs_b,
+                                        common_ab,
+                                        label_a=algo_a,
+                                        label_b=algo_b,
+                                        title=f"{algo_a} vs {algo_b}",
+                                    )
+                                    st.image(img_buf, use_container_width=True)
+                                else:
+                                    st.info(f"{algo_a} 和 {algo_b} 没有共同的源类，无法绘制散点图")
+
+                            with col_b:
+                                st.markdown(f"**{algo_a} vs {algo_b}**")
+                                if len(common_ab) >= 2:
+                                    total_a = np.sum(contribs_a)
+                                    total_b = np.sum(contribs_b)
+                                    pct_a = contribs_a / total_a * 100 if total_a > 0 else contribs_a
+                                    pct_b = contribs_b / total_b * 100 if total_b > 0 else contribs_b
+
+                                    corr = np.corrcoef(pct_a, pct_b)[0, 1]
+                                    rmse = np.sqrt(np.mean((pct_a - pct_b) ** 2))
+
+                                    st.metric("相关系数", f"{corr:.4f}")
+                                    st.metric("均方根差 (%)", f"{rmse:.2f}")
+                                    mean_diff = np.mean(np.abs(pct_a - pct_b))
+                                    st.metric("平均绝对差 (%)", f"{mean_diff:.2f}")
+
+                                    if corr >= 0.9:
+                                        st.success("✅ 算法一致性极好")
+                                    elif corr >= 0.7:
+                                        st.info("ℹ️ 算法一致性良好")
+                                    elif corr >= 0.5:
+                                        st.warning("⚠️ 算法一致性一般")
+                                    else:
+                                        st.error("❌ 算法一致性较差")
+                                else:
+                                    st.info("需要至少2个共同源类才能计算统计指标")
+
+                            st.markdown('---')
+                else:
+                    st.info("需要至少2种算法才能进行一致性分析")
+
+                st.markdown('<p class="section-header">详细结果</p>', unsafe_allow_html=True)
+                for algo in selected_algorithms:
+                    with st.expander(f"{algo} 详细结果"):
+                        contrib_dict = {
+                            'source': source_names_map[algo],
+                            'contribution': results[algo]['avg_contrib'],
+                        }
+                        total = np.sum(results[algo]['avg_contrib'])
+                        contrib_dict['percentage'] = results[algo]['avg_contrib'] / total * 100 if total > 0 else results[algo]['avg_contrib']
+                        contrib_df = pd.DataFrame(contrib_dict)
+                        st.dataframe(contrib_df.round(4), use_container_width=True)
+            else:
+                st.info("请选择算法并点击'开始交叉验证'按钮")
 
 
 elif page == "后向轨迹与潜在源区":
