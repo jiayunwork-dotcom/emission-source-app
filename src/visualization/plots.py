@@ -1152,29 +1152,54 @@ class Visualizer:
             for i, src in enumerate(sources):
                 marker = markers[i % len(markers)]
                 if src['name'] in shutdown_set:
+                    circle_r = 0.8
+                    for _k in range(3):
+                        circle_r_k = circle_r + _k * 0.25
+                        circle = plt.Circle(
+                            (src['x'], src['y']),
+                            circle_r_k,
+                            fill=False,
+                            edgecolor='#888888',
+                            linestyle='--',
+                            linewidth=2.0 if _k == 1 else 1.2,
+                            zorder=11 + _k,
+                        )
+                        ax.add_patch(circle)
+                    ax.scatter(
+                        src['x'], src['y'],
+                        marker='x',
+                        s=250,
+                        color='#666666',
+                        linewidth=3,
+                        zorder=14,
+                    )
                     ax.scatter(
                         src['x'], src['y'],
                         marker='o',
-                        s=200,
-                        facecolors='none',
-                        edgecolors='gray',
-                        linewidth=2,
-                        linestyle='dashed',
-                        zorder=10,
+                        s=220,
+                        facecolors='#e8e8e8',
+                        edgecolors='#666666',
+                        linewidth=2.5,
+                        linestyle='--',
+                        zorder=12,
                     )
                     ax.annotate(
-                        src['name'] + '(已关停)',
+                        src['name'] + ' [已关停]',
                         (src['x'], src['y']),
-                        xytext=(10, 10),
+                        xytext=(14, 14),
                         textcoords='offset points',
-                        fontsize=9,
+                        fontsize=10,
                         fontweight='bold',
-                        color='gray',
-                        bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.6, edgecolor='gray', linestyle='dashed'),
+                        color='#555555',
+                        bbox=dict(
+                            boxstyle='round,pad=0.4',
+                            facecolor='#f0f0f0',
+                            alpha=0.92,
+                            edgecolor='#888888',
+                            linestyle='--',
+                            linewidth=1.5,
+                        ),
                     )
-                    circle = plt.Circle((src['x'], src['y']), 0.3, fill=False,
-                                        edgecolor='gray', linestyle='--', linewidth=1.5)
-                    ax.add_patch(circle)
                 else:
                     ax.scatter(
                         src['x'], src['y'],

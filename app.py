@@ -121,6 +121,8 @@ if 'animation_playing' not in st.session_state:
     st.session_state.animation_playing = False
 if 'animation_current_hour' not in st.session_state:
     st.session_state.animation_current_hour = 0
+if 'animation_speed_ms' not in st.session_state:
+    st.session_state.animation_speed_ms = 500
 if 'source_weights' not in st.session_state:
     st.session_state.source_weights = None
 if 'weighted_result' not in st.session_state:
@@ -128,7 +130,11 @@ if 'weighted_result' not in st.session_state:
 if 'original_contribution_pcts' not in st.session_state:
     st.session_state.original_contribution_pcts = None
 if 'receptor_points' not in st.session_state:
-    st.session_state.receptor_points = []
+    st.session_state.receptor_points = [
+        {'name': 'R1', 'x': 3.5, 'y': 4.5},
+        {'name': 'R2', 'x': 0.0, 'y': 1.0},
+        {'name': 'R3', 'x': 2.0, 'y': -0.5},
+    ]
 if 'receptor_concentrations' not in st.session_state:
     st.session_state.receptor_concentrations = None
 
@@ -3499,14 +3505,24 @@ elif page == "排放清单编制与情景模拟":
                 with col_play1:
                     if st.button("▶️ 播放动画", use_container_width=True):
                         st.session_state.animation_playing = True
-                        st.session_state.animation_current_hour = 0
+                        if st.session_state.animation_current_hour >= 23:
+                            st.session_state.animation_current_hour = 0
+                        st.rerun()
                     if st.button("⏸️ 暂停", use_container_width=True):
                         st.session_state.animation_playing = False
                 with col_play2:
                     if st.button("⏯️ 继续", use_container_width=True):
                         st.session_state.animation_playing = True
+                        st.rerun()
                 with col_play3:
-                    anim_speed = st.selectbox("帧间隔", [200, 500, 1000], index=1, format_func=lambda x: f"{x}ms")
+                    anim_speed = st.selectbox(
+                        "帧间隔",
+                        [200, 500, 1000],
+                        index=1,
+                        format_func=lambda x: f"{x}ms",
+                        key="anim_speed_select",
+                    )
+                    st.session_state.animation_speed_ms = anim_speed
 
                 anim_hour = st.slider(
                     "时间轴",
@@ -3516,104 +3532,82 @@ elif page == "排放清单编制与情景模拟":
                     step=1,
                     key="anim_timeline",
                 )
-                st.session_state.animation_current_hour = anim_hour
+                if anim_hour != st.session_state.animation_current_hour:
+                    st.session_state.animation_current_hour = anim_hour
+                    st.session_state.animation_playing = False
+                    st.rerun()
 
         with col_anim_right:
             if st.session_state.animation_results is not None:
+                should_auto_refresh = False
                 if st.session_state.animation_playing:
-                    anim_speed_ms = 500
-                    heatmap_placeholder = st.empty()
-                    info_placeholder = st.empty()
-                    chart_placeholder = st.empty()
+                    should_auto_refresh = True
 
-                    for h in range(st.session_state.animation_current_hour, 24):
-                        if not st.session_state.animation_playing:
-                            break
-                        h_data = st.session_state.animation_results.get(h)
-                        if h_data is None:
-                            continue
+                current_h = st.session_state.animation_current_hour
+                anim_data = st.session_state.animation_results.get(current_h)
+                if anim_data is not None:
+                    anim_result = anim_data['result']
+                    anim_ws = anim_data['wind_speed']
+                    anim_wd = anim_data['wind_direction']
 
-                        h_result = h_data['result']
-                        h_ws = h_data['wind_speed']
-                        h_wd = h_data['wind_direction']
-
-                        info_placeholder.markdown(
-                            f"**当前时刻: {h}:00** | 风速: {h_ws:.1f} m/s | 风向: {h_wd:.0f}°"
-                        )
-
-                        sources_for_anim = [
-                            {'name': cfg['name'], 'x': cfg['x'], 'y': cfg['y']}
-                            for cfg in st.session_state.dispersion_sources_config
-                        ]
-                        img_frame = viz.concentration_heatmap(
-                            concentration_field=h_result.concentration_field,
-                            x_grid=h_result.x_grid,
-                            y_grid=h_result.y_grid,
-                            sources=sources_for_anim,
-                            wind_direction=h_wd,
-                            title=f"PM2.5浓度分布 - {h}:00 (风速{h_ws:.1f}m/s 风向{h_wd:.0f}°)",
-                        )
-                        heatmap_placeholder.image(img_frame, use_container_width=True)
-
-                        max_concs_anim = []
-                        for hh in range(24):
-                            hh_data = st.session_state.animation_results.get(hh)
-                            if hh_data is not None:
-                                max_concs_anim.append(hh_data['result'].max_concentration)
-                            else:
-                                max_concs_anim.append(0.0)
-                        img_anim_ts = viz.time_series_max_conc_chart(
-                            hours=list(range(24)),
-                            max_concentrations=max_concs_anim,
-                            current_hour=h,
-                        )
-                        chart_placeholder.image(img_anim_ts, use_container_width=True)
-
-                        st.session_state.animation_current_hour = h
-                        time.sleep(anim_speed_ms / 1000.0)
-
-                    st.session_state.animation_playing = False
-                else:
-                    current_h = st.session_state.animation_current_hour
-                    anim_data = st.session_state.animation_results.get(current_h)
-                    if anim_data is not None:
-                        anim_result = anim_data['result']
-                        anim_ws = anim_data['wind_speed']
-                        anim_wd = anim_data['wind_direction']
-
-                        st.markdown(f"**当前时刻: {current_h}:00** | 风速: {anim_ws:.1f} m/s | 风向: {anim_wd:.0f}°")
-
-                        sources_for_plot = [
-                            {'name': cfg['name'], 'x': cfg['x'], 'y': cfg['y']}
-                            for cfg in st.session_state.dispersion_sources_config
-                        ]
-                        img_anim = viz.concentration_heatmap(
-                            concentration_field=anim_result.concentration_field,
-                            x_grid=anim_result.x_grid,
-                            y_grid=anim_result.y_grid,
-                            sources=sources_for_plot,
-                            wind_direction=anim_wd,
-                            title=f"PM2.5浓度分布 - {current_h}:00 (风速{anim_ws:.1f}m/s 风向{anim_wd:.0f}°)",
-                        )
-                        st.image(img_anim, use_container_width=True)
-
-                        st.markdown("---")
-                        max_concs = []
-                        for h in range(24):
-                            h_data = st.session_state.animation_results.get(h)
-                            if h_data is not None:
-                                max_concs.append(h_data['result'].max_concentration)
-                            else:
-                                max_concs.append(0.0)
-
-                        img_ts = viz.time_series_max_conc_chart(
-                            hours=list(range(24)),
-                            max_concentrations=max_concs,
-                            current_hour=current_h,
-                        )
-                        st.image(img_ts, use_container_width=True)
+                    if st.session_state.animation_playing:
+                        status_label = "▶️ 播放中"
                     else:
-                        st.info("请选择有效时刻")
+                        status_label = "⏸️ 已暂停"
+                    st.markdown(
+                        f"**{status_label}** &nbsp;&nbsp; 当前时刻: **{current_h}:00** "
+                        f"&nbsp;|&nbsp; 风速: **{anim_ws:.1f} m/s** &nbsp;|&nbsp; 风向: **{anim_wd:.0f}°**"
+                    )
+
+                    sources_for_plot = [
+                        {'name': cfg['name'], 'x': cfg['x'], 'y': cfg['y']}
+                        for cfg in st.session_state.dispersion_sources_config
+                    ]
+                    img_anim = viz.concentration_heatmap(
+                        concentration_field=anim_result.concentration_field,
+                        x_grid=anim_result.x_grid,
+                        y_grid=anim_result.y_grid,
+                        sources=sources_for_plot,
+                        wind_direction=anim_wd,
+                        title=f"PM2.5浓度分布 - {current_h}:00 (风速{anim_ws:.1f}m/s 风向{anim_wd:.0f}°)",
+                    )
+                    st.image(img_anim, use_container_width=True)
+
+                    st.markdown("---")
+                    max_concs = []
+                    for h in range(24):
+                        h_data = st.session_state.animation_results.get(h)
+                        if h_data is not None:
+                            max_concs.append(h_data['result'].max_concentration)
+                        else:
+                            max_concs.append(0.0)
+
+                    img_ts = viz.time_series_max_conc_chart(
+                        hours=list(range(24)),
+                        max_concentrations=max_concs,
+                        current_hour=current_h,
+                    )
+                    st.image(img_ts, use_container_width=True)
+
+                    if should_auto_refresh:
+                        anim_speed_ms = st.session_state.get('animation_speed_ms', 500)
+                        if current_h < 23:
+                            st.session_state.animation_current_hour = current_h + 1
+                            st.markdown(
+                                f"""
+                                <script>
+                                setTimeout(function() {{
+                                    window.location.reload();
+                                }}, {anim_speed_ms});
+                                </script>
+                                """,
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.session_state.animation_playing = False
+                            st.markdown("✅ **播放完成**，已自动暂停。")
+                else:
+                    st.info("请选择有效时刻")
             else:
                 st.info("请先点击'预计算24小时浓度场'按钮")
 
@@ -3765,6 +3759,12 @@ elif page == "排放清单编制与情景模拟":
 
         with col_rp_left:
             st.markdown("**受体点设置**")
+            st.warning(
+                "💡 **提示**: 高斯烟羽模型仅在下风向产生浓度。"
+                "若风向为225°（西南风，从西南→东北吹），"
+                "下风向区域为源的东北方向（X和Y增大的方向）。"
+                "上风向位置浓度≈0是正常现象。"
+            )
 
             n_receptors = st.number_input(
                 "受体点数量",
@@ -3775,12 +3775,73 @@ elif page == "排放清单编制与情景模拟":
                 key="n_receptors",
             )
 
+            col_btn1, col_btn2 = st.columns(2)
+            with col_btn1:
+                if st.button("🎯 智能推荐（下风向）", use_container_width=True,
+                             help="根据当前风向自动在各源下风向设置1~3个受体点"):
+                    wd_rad = np.radians(270.0 - wind_direction)
+                    downwind_dx = np.cos(wd_rad)
+                    downwind_dy = np.sin(wd_rad)
+                    suggested = []
+                    all_sources = st.session_state.dispersion_sources_config
+                    distances = [2.0, 4.0, 6.0]
+                    for idx, src in enumerate(all_sources):
+                        d = distances[idx % len(distances)]
+                        sx = src['x'] + downwind_dx * d
+                        sy = src['y'] + downwind_dy * d
+                        suggested.append({
+                            'name': f'R{idx+1}({src["name"]}下风向)',
+                            'x': round(sx, 1),
+                            'y': round(sy, 1),
+                        })
+                        if len(suggested) >= n_receptors:
+                            break
+                    while len(suggested) < n_receptors:
+                        k = len(suggested)
+                        avg_x = np.mean([s['x'] for s in all_sources])
+                        avg_y = np.mean([s['y'] for s in all_sources])
+                        d = 3.0 + k * 1.5
+                        suggested.append({
+                            'name': f'R{k+1}',
+                            'x': round(avg_x + downwind_dx * d, 1),
+                            'y': round(avg_y + downwind_dy * d, 1),
+                        })
+                    st.session_state.receptor_points = suggested
+                    st.rerun()
+            with col_btn2:
+                if st.button("🔄 四向分布（默认）", use_container_width=True,
+                             help="在源周围东/南/西/北四个方向设置，保证至少一个在下风向"):
+                    defaults = [
+                        {'name': 'R1-东北', 'x': 3.5, 'y': 4.5},
+                        {'name': 'R2-西北', 'x': -3.0, 'y': 2.5},
+                        {'name': 'R3-东南', 'x': 3.5, 'y': -2.5},
+                        {'name': 'R4-西南', 'x': -2.5, 'y': -3.5},
+                        {'name': 'R5-中心', 'x': 0.0, 'y': 0.0},
+                    ]
+                    st.session_state.receptor_points = defaults[:max(int(n_receptors), 3)]
+                    st.rerun()
+
             current_receptors = []
+            preset_rps = st.session_state.receptor_points
             for i in range(n_receptors):
-                existing = st.session_state.receptor_points[i] if i < len(st.session_state.receptor_points) else None
-                default_x = existing['x'] if existing else 0.0
-                default_y = existing['y'] if existing else 0.0
-                rp_name = existing.get('name', f'R{i+1}') if existing else f'R{i+1}'
+                existing = preset_rps[i] if i < len(preset_rps) else None
+                if existing:
+                    default_x = existing['x']
+                    default_y = existing['y']
+                    rp_name = existing.get('name', f'R{i+1}')
+                else:
+                    rp_name = f'R{i+1}'
+                    if i < 3:
+                        fallbacks = [
+                            {'x': 3.5, 'y': 4.5},
+                            {'x': 0.0, 'y': 1.0},
+                            {'x': 2.0, 'y': -0.5},
+                        ]
+                        default_x = fallbacks[i]['x']
+                        default_y = fallbacks[i]['y']
+                    else:
+                        default_x = float(np.cos(np.radians(i * 90)) * 4.0)
+                        default_y = float(np.sin(np.radians(i * 90)) * 4.0)
 
                 st.markdown(f"**受体{i+1}**")
                 rp_name_input = st.text_input(f"名称", value=rp_name, key=f"rp_name_{i}")
@@ -3789,6 +3850,24 @@ elif page == "排放清单编制与情景模拟":
                     rp_x = st.number_input(f"X(km)", value=default_x, step=0.1, key=f"rp_x_{i}")
                 with col_ry:
                     rp_y = st.number_input(f"Y(km)", value=default_y, step=0.1, key=f"rp_y_{i}")
+
+                wd_rad_check = np.radians(270.0 - wind_direction)
+                all_sources_cfg = st.session_state.dispersion_sources_config
+                upwind_flags = []
+                for src in all_sources_cfg:
+                    dx = rp_x - src['x']
+                    dy = rp_y - src['y']
+                    x_downwind = dx * np.cos(wd_rad_check) + dy * np.sin(wd_rad_check)
+                    if x_downwind <= 0.01:
+                        upwind_flags.append(src['name'])
+                if upwind_flags:
+                    st.caption(
+                        f"⚠️ 位于 {', '.join(upwind_flags)} 的上风向，"
+                        f"来自这些源的贡献≈0"
+                    )
+                else:
+                    st.caption("✅ 位于所有源的下风向")
+
                 current_receptors.append({'name': rp_name_input, 'x': rp_x, 'y': rp_y})
 
             st.session_state.receptor_points = current_receptors
@@ -3821,7 +3900,18 @@ elif page == "排放清单编制与情景模拟":
                         weights=rp_weights,
                     )
                     st.session_state.receptor_concentrations = receptor_concs
-                    st.success("✅ 受体点浓度计算完成")
+                    total_nonan = sum(
+                        1 for v in receptor_concs.values()
+                        if (v['总浓度'] - background_conc) > 1e-10
+                    )
+                    if total_nonan == 0:
+                        st.warning(
+                            "⚠️ 所有受体点检测到的非背景浓度都接近 0。"
+                            "请检查：1)受体点是否位于源的下风向？2)源强/气象参数是否合理？"
+                            "建议点击'智能推荐'按钮自动选择下风向位置。"
+                        )
+                    else:
+                        st.success(f"✅ 受体点浓度计算完成（{total_nonan}/{len(current_receptors)}个点有有效源贡献）")
 
         with col_rp_right:
             if st.session_state.receptor_concentrations is not None:
