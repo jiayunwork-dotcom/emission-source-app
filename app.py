@@ -2097,8 +2097,52 @@ elif page == "排放清单编制与情景模拟":
         result = result_info['result']
         if hasattr(result, 'get_contribution_dataframe'):
             contrib_dict = result.get_contribution_dataframe()
-            for i, name in enumerate(contrib_dict['source']):
-                source_contribs[name] = contrib_dict['contribution'][i]
+            source_names = contrib_dict['source']
+            contributions = contrib_dict['contribution']
+            
+            industry_mapping = {}
+            inventory_industries = inventory.factor_library.get_all_industries()
+            
+            for src_name in source_names:
+                src_name_lower = src_name.lower()
+                matched = None
+                for ind_name in inventory_industries:
+                    ind_name_lower = ind_name.lower()
+                    if '煤' in src_name_lower and '煤' in ind_name_lower:
+                        matched = ind_name
+                        break
+                    elif '机动车' in src_name_lower or '车' in src_name_lower and '车' in ind_name_lower:
+                        matched = ind_name
+                        break
+                    elif '扬尘' in src_name_lower and '扬尘' in ind_name_lower:
+                        matched = ind_name
+                        break
+                    elif '生物质' in src_name_lower and '生物质' in ind_name_lower:
+                        matched = ind_name
+                        break
+                    elif '餐饮' in src_name_lower or '油烟' in src_name_lower and ('餐饮' in ind_name_lower or '油烟' in ind_name_lower):
+                        matched = ind_name
+                        break
+                    elif '工业' in src_name_lower and '煤' in ind_name_lower:
+                        matched = ind_name
+                        break
+                    elif '建筑' in src_name_lower and '扬尘' in ind_name_lower:
+                        matched = ind_name
+                        break
+                    elif '道路' in src_name_lower and '扬尘' in ind_name_lower:
+                        matched = ind_name
+                        break
+                
+                if matched:
+                    industry_mapping[src_name] = matched
+            
+            for i, src_name in enumerate(source_names):
+                if src_name in industry_mapping:
+                    ind_name = industry_mapping[src_name]
+                    source_contribs[ind_name] = contributions[i]
+                else:
+                    source_contribs[src_name] = contributions[i]
+        
         inventory.set_source_contributions(source_contribs)
 
     current_pm25 = 35.0

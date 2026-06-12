@@ -123,15 +123,12 @@ class ScenarioSimulationEngine:
 
         return scenario_emissions
 
-    def _saturation_correction(self, theoretical_reduction: float,
-                               current_concentration: float) -> float:
+    def _saturation_correction(self, theoretical_reduction_ratio: float) -> float:
         max_reduction_ratio = 0.85
-        theoretical_ratio = theoretical_reduction / current_concentration
-        if theoretical_ratio <= 0:
+        if theoretical_reduction_ratio <= 0:
             return 0.0
-        actual_ratio = (theoretical_ratio * max_reduction_ratio) / \
-                       (max_reduction_ratio + theoretical_ratio)
-        return actual_ratio * current_concentration
+        actual_ratio = max_reduction_ratio * (1 - np.exp(-theoretical_reduction_ratio / 0.3))
+        return actual_ratio
 
     def simulate_scenario(self, scenario_name: str) -> Optional[Scenario]:
         if scenario_name not in self.scenarios:
@@ -155,17 +152,21 @@ class ScenarioSimulationEngine:
 
         scenario.emission_reductions = emission_reductions
 
-        total_reduction = sum(emission_reductions.values())
-        reduction_ratio = total_reduction / baseline_total if baseline_total > 0 else 0
+        industry_reduction_ratios = []
+        for name in self.baseline_emissions:
+            baseline = self.baseline_emissions[name]
+            if baseline > 0:
+                reduction = emission_reductions.get(name, 0.0)
+                ratio = reduction / baseline
+                industry_reduction_ratios.append(ratio)
 
-        theoretical_concentration_reduction = reduction_ratio * self.current_pm25_concentration
-        actual_reduction = self._saturation_correction(
-            theoretical_concentration_reduction,
-            self.current_pm25_concentration
-        )
+        total_theoretical_ratio = sum(industry_reduction_ratios)
+
+        actual_reduction_ratio = self._saturation_correction(total_theoretical_ratio)
+        actual_reduction = actual_reduction_ratio * self.current_pm25_concentration
 
         scenario.expected_concentration = self.current_pm25_concentration - actual_reduction
-        scenario.reduction_percentage = (actual_reduction / self.current_pm25_concentration * 100
+        scenario.reduction_percentage = (actual_reduction_ratio * 100
                                          if self.current_pm25_concentration > 0 else 0)
 
         return scenario
