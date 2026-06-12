@@ -574,3 +574,250 @@ class Visualizer:
 
         plt.tight_layout()
         return self._fig_to_bytes(fig)
+
+    def scenario_comparison_bar(
+        self,
+        scenario_names: List[str],
+        current_concentration: float,
+        expected_concentrations: List[float],
+        title: str = "减排情景对比",
+        ylabel: str = "PM2.5浓度 (μg/m³)",
+    ) -> BytesIO:
+        fig, ax = plt.subplots(figsize=(max(10, len(scenario_names) * 2.5), 6))
+
+        n_scenarios = len(scenario_names)
+        width = 0.35
+        x = np.arange(n_scenarios)
+
+        current_vals = [current_concentration] * n_scenarios
+
+        bars1 = ax.bar(x - width/2, current_vals, width, label='当前浓度',
+                       color='#ff7f0e', alpha=0.85)
+        bars2 = ax.bar(x + width/2, expected_concentrations, width, label='预期浓度',
+                       color='#2ca02c', alpha=0.85)
+
+        for bar, val in zip(bars2, expected_concentrations):
+            height = bar.get_height()
+            reduction = current_concentration - val
+            if reduction > 0:
+                ax.annotate(f'-{reduction:.1f}\n(-{reduction/current_concentration*100:.1f}%)',
+                            xy=(bar.get_x() + bar.get_width() / 2, height),
+                            xytext=(0, 3),
+                            textcoords="offset points",
+                            ha='center', va='bottom',
+                            fontsize=9, color='red', fontweight='bold')
+
+        ax.set_xlabel('减排情景', fontsize=12)
+        ax.set_ylabel(ylabel, fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels(scenario_names, rotation=30, ha='right')
+        ax.grid(True, alpha=0.3, axis='y')
+        ax.axhline(y=35, color='red', linestyle='--', alpha=0.7, linewidth=1, label='国家二级标准(35μg/m³)')
+        ax.legend(loc='upper right', fontsize=10)
+
+        plt.tight_layout()
+        return self._fig_to_bytes(fig)
+
+    def emission_pie_chart(
+        self,
+        industry_names: List[str],
+        emissions: List[float],
+        title: str = "各行业PM2.5排放占比",
+    ) -> BytesIO:
+        fig, ax = plt.subplots(figsize=(8, 8))
+        colors = COLORS[:len(industry_names)]
+
+        total = sum(emissions)
+        if total > 0:
+            percentages = [e / total * 100 for e in emissions]
+        else:
+            percentages = [0] * len(emissions)
+
+        wedges, texts, autotexts = ax.pie(
+            emissions,
+            labels=industry_names,
+            autopct='%1.1f%%',
+            colors=colors,
+            startangle=90,
+            textprops={'fontsize': 10},
+            explode=[0.05] * len(industry_names),
+        )
+
+        for at, pct in zip(autotexts, percentages):
+            if pct < 3:
+                at.set_visible(False)
+
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.axis('equal')
+
+        legend_labels = [f"{name}: {emission:.2f}吨/年" for name, emission in zip(industry_names, emissions)]
+        ax.legend(wedges, legend_labels, loc='center left', bbox_to_anchor=(1, 0.5), fontsize=9)
+
+        return self._fig_to_bytes(fig)
+
+    def validation_gauge_chart(
+        self,
+        industry_names: List[str],
+        deviation_rates: List[float],
+        statuses: List[str],
+        title: str = "清单质量平衡校验",
+    ) -> BytesIO:
+        n_industries = len(industry_names)
+        n_cols = min(3, n_industries)
+        n_rows = (n_industries + n_cols - 1) // n_cols
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
+        if n_industries == 1:
+            axes = np.array([axes])
+        axes = axes.flatten()
+
+        for i, (name, dev, status) in enumerate(zip(industry_names, deviation_rates, statuses)):
+            ax = axes[i]
+
+            if status == 'green':
+                color = '#2ca02c'
+            elif status == 'yellow':
+                color = '#ff7f0e'
+            else:
+                color = '#d62728'
+
+            angles = np.linspace(0, np.pi, 100)
+            x_circle = np.cos(angles)
+            y_circle = np.sin(angles)
+
+            ax.plot(x_circle, y_circle, 'gray', linewidth=1, alpha=0.3)
+
+            warning_range = 0.3
+            danger_range = 0.5
+
+            angle_green_start = np.pi * (0.5 + warning_range)
+            angle_green_end = np.pi * (0.5 - warning_range)
+            angles_green = np.linspace(angle_green_start, angle_green_end, 50)
+            ax.fill_between(np.cos(angles_green), np.sin(angles_green), alpha=0.2, color='#2ca02c')
+
+            angle_yellow1_start = np.pi
+            angle_yellow1_end = np.pi * (0.5 + warning_range)
+            angles_yellow1 = np.linspace(angle_yellow1_start, angle_yellow1_end, 30)
+            ax.fill_between(np.cos(angles_yellow1), np.sin(angles_yellow1), alpha=0.3, color='#ff7f0e')
+
+            angle_yellow2_start = np.pi * (0.5 - warning_range)
+            angle_yellow2_end = 0
+            angles_yellow2 = np.linspace(angle_yellow2_start, angle_yellow2_end, 30)
+            ax.fill_between(np.cos(angles_yellow2), np.sin(angles_yellow2), alpha=0.3, color='#ff7f0e')
+
+            normalized_dev = np.clip(dev / 100.0, -1, 1)
+            needle_angle = np.pi * (0.5 - normalized_dev * 0.5)
+
+            ax.plot([0, 0.85 * np.cos(needle_angle)], [0, 0.85 * np.sin(needle_angle)],
+                    color=color, linewidth=3, zorder=5)
+            ax.scatter([0.85 * np.cos(needle_angle)], [0.85 * np.sin(needle_angle)],
+                       color=color, s=100, zorder=6)
+
+            ax.set_ylim(-0.1, 1.1)
+            ax.set_xlim(-1.1, 1.1)
+            ax.set_xticks([-1, -0.5, 0, 0.5, 1])
+            ax.set_xticklabels(['-100%', '-50%', '0%', '50%', '100%'])
+            ax.set_yticks([])
+            ax.set_title(f"{name}\n偏差: {dev:.1f}%", fontsize=11, fontweight='bold', color=color)
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+            ax.axhline(y=0, color='gray', alpha=0.3)
+
+        for j in range(i + 1, len(axes)):
+            axes[j].set_visible(False)
+
+        fig.suptitle(title, fontsize=14, fontweight='bold')
+        plt.tight_layout()
+
+        return self._fig_to_bytes(fig)
+
+    def emission_bar_chart(
+        self,
+        industry_names: List[str],
+        emissions: List[float],
+        title: str = "各行业PM2.5排放量",
+        ylabel: str = "排放量 (吨/年)",
+    ) -> BytesIO:
+        fig, ax = plt.subplots(figsize=(max(10, len(industry_names) * 1.5), 6))
+        colors = COLORS[:len(industry_names)]
+
+        bars = ax.bar(industry_names, emissions, color=colors, alpha=0.85, edgecolor='black', linewidth=0.5)
+
+        for bar, val in zip(bars, emissions):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width() / 2, height,
+                    f'{val:.2f}',
+                    ha='center', va='bottom', fontsize=9, fontweight='bold')
+
+        ax.set_xlabel('行业', fontsize=12)
+        ax.set_ylabel(ylabel, fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.set_xticklabels(industry_names, rotation=30, ha='right')
+        ax.grid(True, alpha=0.3, axis='y')
+
+        total = sum(emissions)
+        ax.text(0.98, 0.98, f'总排放量: {total:.2f} 吨/年',
+                transform=ax.transAxes, ha='right', va='top',
+                fontsize=11, fontweight='bold',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+        plt.tight_layout()
+        return self._fig_to_bytes(fig)
+
+    def emission_factor_curve(
+        self,
+        x_values: np.ndarray,
+        y_values: np.ndarray,
+        x_label: str,
+        y_label: str,
+        title: str = "排放因子曲线",
+    ) -> BytesIO:
+        fig, ax = plt.subplots(figsize=(8, 5))
+
+        ax.plot(x_values, y_values, 'b-', linewidth=2, label='排放因子')
+        ax.fill_between(x_values, y_values, alpha=0.3, color='#1f77b4')
+
+        ax.set_xlabel(x_label, fontsize=12)
+        ax.set_ylabel(y_label, fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+        plt.tight_layout()
+        return self._fig_to_bytes(fig)
+
+    def reduction_measures_bar(
+        self,
+        scenario_names: List[str],
+        industry_reductions: Dict[str, List[float]],
+        title: str = "各行业减排贡献",
+        ylabel: str = "减排量 (吨/年)",
+    ) -> BytesIO:
+        fig, ax = plt.subplots(figsize=(max(12, len(scenario_names) * 2.5), 6))
+
+        n_scenarios = len(scenario_names)
+        n_industries = len(industry_reductions)
+        width = 0.8 / max(1, n_industries)
+
+        industry_names = list(industry_reductions.keys())
+        colors = COLORS[:n_industries]
+
+        x = np.arange(n_scenarios)
+        bottom = np.zeros(n_scenarios)
+
+        for i, (industry, reductions) in enumerate(industry_reductions.items()):
+            ax.bar(x, reductions, width, bottom=bottom, label=industry,
+                   color=colors[i], alpha=0.85)
+            bottom += np.array(reductions)
+
+        ax.set_xlabel('减排情景', fontsize=12)
+        ax.set_ylabel(ylabel, fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels(scenario_names, rotation=30, ha='right')
+        ax.legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize=10)
+        ax.grid(True, alpha=0.3, axis='y')
+
+        plt.tight_layout()
+        return self._fig_to_bytes(fig)

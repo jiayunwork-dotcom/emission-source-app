@@ -15,6 +15,12 @@ from src.algorithms.pca_mlr import PCAMLRSolver
 from src.trajectory.pscf_cwt import TrajectoryAnalyzer
 from src.visualization.plots import Visualizer
 from src.report.pdf_generator import ReportGenerator
+from src.emission_inventory import (
+    EmissionFactorLibrary,
+    EmissionInventoryCalculator,
+    ScenarioSimulationEngine,
+)
+from src.emission_inventory.scenario_engine import ReductionMeasure
 
 
 st.set_page_config(
@@ -89,6 +95,12 @@ if 'cross_validation_results' not in st.session_state:
     st.session_state.cross_validation_results = None
 if 'anomaly_traceability' not in st.session_state:
     st.session_state.anomaly_traceability = None
+if 'emission_inventory' not in st.session_state:
+    st.session_state.emission_inventory = EmissionInventoryCalculator()
+if 'scenario_engine' not in st.session_state:
+    st.session_state.scenario_engine = ScenarioSimulationEngine(st.session_state.emission_inventory)
+if 'emission_inventory_warning_shown' not in st.session_state:
+    st.session_state.emission_inventory_warning_shown = False
 
 
 st.sidebar.title("🌫️ 工业废气排放源解析系统")
@@ -103,6 +115,7 @@ page = st.sidebar.radio(
         "交叉验证",
         "后向轨迹与潜在源区",
         "多站点对比",
+        "排放清单编制与情景模拟",
         "报告导出",
     ]
 )
@@ -2067,6 +2080,645 @@ elif page == "多站点对比":
                         st.image(img_buf, use_container_width=True)
 
 
+elif page == "排放清单编制与情景模拟":
+    st.markdown('<p class="main-header">📋 排放清单编制与情景模拟</p>', unsafe_allow_html=True)
+
+    inventory = st.session_state.emission_inventory
+    scenario_engine = st.session_state.scenario_engine
+    viz = st.session_state.visualizer
+
+    if st.session_state.last_result is None and not st.session_state.emission_inventory_warning_shown:
+        st.warning("⚠️ 尚未完成源解析分析，建议先在'源解析分析'页面运行解析算法，以获得自上而下的源贡献数据用于清单校验。")
+        st.session_state.emission_inventory_warning_shown = True
+
+    source_contribs = {}
+    if st.session_state.last_result is not None:
+        result_info = st.session_state.last_result
+        result = result_info['result']
+        if hasattr(result, 'get_contribution_dataframe'):
+            contrib_dict = result.get_contribution_dataframe()
+            for i, name in enumerate(contrib_dict['source']):
+                source_contribs[name] = contrib_dict['contribution'][i]
+        inventory.set_source_contributions(source_contribs)
+
+    current_pm25 = 35.0
+    if st.session_state.data_df is not None:
+        df = st.session_state.data_df
+        if 'PM2.5' in df.columns:
+            current_pm25 = df['PM2.5'].mean()
+        else:
+            component_cols = st.session_state.component_cols
+            total_mass = np.sum(df[component_cols].values, axis=1)
+            current_pm25 = np.nanmean(total_mass)
+    scenario_engine.set_current_pm25(current_pm25)
+
+    st.info(f"📊 当前实测PM2.5平均浓度: **{current_pm25:.2f} μg/m³**")
+
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📝 排放清单编制",
+        "🌱 减排情景模拟",
+        "⚖️ 清单校验与平衡",
+        "📤 数据导出"
+    ])
+
+    with tab1:
+        st.markdown('<p class="section-header">排放清单编制</p>', unsafe_allow_html=True)
+        st.info("配置各行业的活动水平数据、控制参数和治理效率，系统将自动计算PM2.5排放量。")
+
+        industries = inventory.factor_library.get_all_industries()
+        col1, col2 = st.columns([1, 1])
+
+        for idx, industry_name in enumerate(industries):
+            with col1 if idx % 2 == 0 else col2:
+                with st.expander(f"🏭 {industry_name}", expanded=True):
+                    factor = inventory.factor_library.get_factor(industry_name)
+                    activity_data = inventory.get_activity_data(industry_name)
+
+                    if industry_name == "燃煤电厂":
+                        st.markdown("**燃煤量**")
+                        coal_amount = st.number_input(
+                            "年燃煤量 (万吨/年)",
+                            min_value=0.0,
+                            value=activity_data.activity_level if activity_data else 500.0,
+                            step=10.0,
+                            key=f"coal_{industry_name}"
+                        )
+                        desulf_eff = st.slider(
+                            "脱硫效率 (%)",
+                            min_value=0, max_value=99,
+                            value=int(activity_data.factor_params.get('desulfurization_efficiency', 70)) if activity_data else 70,
+                            step=1,
+                            key=f"desulf_{industry_name}"
+                        )
+                        control_eff = st.slider(
+                            "综合控制效率 (%)",
+                            min_value=0, max_value=99,
+                            value=int(activity_data.control_efficiency) if activity_data else 30,
+                            step=1,
+                            key=f"ctrl_{industry_name}"
+                        )
+                        factor_params = {'desulfurization_efficiency': desulf_eff}
+
+                        eff_range = np.linspace(0, 99, 100)
+                        factor_vals = [12.0 * np.exp(-4.6 * e/100) for e in eff_range]
+                        factor_vals = [max(f, 0.12) for f in factor_vals]
+                        img_buf = viz.emission_factor_curve(
+                            eff_range, factor_vals,
+                            "脱硫效率 (%)", "排放因子 (kg/吨煤)",
+                            f"{industry_name} - 排放因子曲线"
+                        )
+                        st.image(img_buf, use_container_width=True)
+
+                    elif industry_name == "机动车":
+                        st.markdown("**机动车保有量**")
+                        vehicle_count = st.number_input(
+                            "机动车保有量 (万辆)",
+                            min_value=0.0,
+                            value=activity_data.activity_level if activity_data else 100.0,
+                            step=5.0,
+                            key=f"veh_{industry_name}"
+                        )
+                        standards = ['国III', '国IV', '国V', '国VI']
+                        default_standard = activity_data.factor_params.get('emission_standard', '国IV') if activity_data else '国IV'
+                        default_idx = standards.index(default_standard) if default_standard in standards else 0
+                        emission_standard = st.selectbox(
+                            "主导排放标准",
+                            standards,
+                            index=default_idx,
+                            key=f"std_{industry_name}"
+                        )
+                        annual_vkm = st.number_input(
+                            "年均行驶里程 (公里)",
+                            min_value=0,
+                            value=int(activity_data.factor_params.get('annual_vkm', 15000)) if activity_data else 15000,
+                            step=1000,
+                            key=f"vkm_{industry_name}"
+                        )
+                        control_eff = st.slider(
+                            "综合控制效率 (%)",
+                            min_value=0, max_value=99,
+                            value=int(activity_data.control_efficiency) if activity_data else 10,
+                            step=1,
+                            key=f"ctrl_{industry_name}"
+                        )
+                        factor_params = {
+                            'emission_standard': emission_standard,
+                            'annual_vkm': annual_vkm
+                        }
+
+                        st.markdown("**各排放标准排放因子 (g/km):**")
+                        std_df = pd.DataFrame({
+                            '排放标准': ['国III', '国IV', '国V', '国VI'],
+                            '排放因子 (g/km)': [0.08, 0.05, 0.03, 0.015]
+                        })
+                        st.dataframe(std_df, use_container_width=True)
+
+                    elif industry_name == "工地扬尘":
+                        st.markdown("**建筑工地面积**")
+                        site_area = st.number_input(
+                            "施工面积 (万平方米)",
+                            min_value=0.0,
+                            value=activity_data.activity_level if activity_data else 500.0,
+                            step=10.0,
+                            key=f"area_{industry_name}"
+                        )
+                        coverage_rate = st.slider(
+                            "场地覆盖率 (%)",
+                            min_value=0, max_value=100,
+                            value=int(activity_data.factor_params.get('coverage_rate', 50)) if activity_data else 50,
+                            step=1,
+                            key=f"cover_{industry_name}"
+                        )
+                        control_eff = st.slider(
+                            "综合控制效率 (%)",
+                            min_value=0, max_value=99,
+                            value=int(activity_data.control_efficiency) if activity_data else 20,
+                            step=1,
+                            key=f"ctrl_{industry_name}"
+                        )
+                        factor_params = {'coverage_rate': coverage_rate}
+
+                        cov_range = np.linspace(0, 100, 100)
+                        factor_vals = [0.5 * (1 - c/100) + 0.01 * c/100 for c in cov_range]
+                        factor_vals = [max(f, 0.01) for f in factor_vals]
+                        img_buf = viz.emission_factor_curve(
+                            cov_range, factor_vals,
+                            "覆盖率 (%)", "排放因子 (t/万平方米/年)",
+                            f"{industry_name} - 排放因子曲线"
+                        )
+                        st.image(img_buf, use_container_width=True)
+
+                    elif industry_name == "生物质燃烧":
+                        st.markdown("**秸秆燃烧量**")
+                        biomass_amount = st.number_input(
+                            "年燃烧量 (万吨/年)",
+                            min_value=0.0,
+                            value=activity_data.activity_level if activity_data else 50.0,
+                            step=5.0,
+                            key=f"bio_{industry_name}"
+                        )
+                        crop_types = ['稻草', '麦秆', '玉米秸秆']
+                        default_crop = activity_data.factor_params.get('crop_type', '稻草') if activity_data else '稻草'
+                        default_idx = crop_types.index(default_crop) if default_crop in crop_types else 0
+                        crop_type = st.selectbox(
+                            "主导秸秆类型",
+                            crop_types,
+                            index=default_idx,
+                            key=f"crop_{industry_name}"
+                        )
+                        control_eff = st.slider(
+                            "综合控制效率 (%)",
+                            min_value=0, max_value=99,
+                            value=int(activity_data.control_efficiency) if activity_data else 5,
+                            step=1,
+                            key=f"ctrl_{industry_name}"
+                        )
+                        factor_params = {'crop_type': crop_type}
+
+                        st.markdown("**各秸秆类型排放因子 (g/kg):**")
+                        crop_df = pd.DataFrame({
+                            '秸秆类型': ['稻草', '麦秆', '玉米秸秆'],
+                            '排放因子 (g/kg)': [8.3, 7.2, 6.8]
+                        })
+                        st.dataframe(crop_df, use_container_width=True)
+
+                    elif industry_name == "餐饮油烟":
+                        st.markdown("**餐饮营业额**")
+                        revenue = st.number_input(
+                            "年营业额 (万元/年)",
+                            min_value=0.0,
+                            value=activity_data.activity_level if activity_data else 50000.0,
+                            step=1000.0,
+                            key=f"rev_{industry_name}"
+                        )
+                        purifier_eff = st.slider(
+                            "油烟净化器效率 (%)",
+                            min_value=0, max_value=95,
+                            value=int(activity_data.factor_params.get('purifier_efficiency', 60)) if activity_data else 60,
+                            step=1,
+                            key=f"pur_{industry_name}"
+                        )
+                        control_eff = st.slider(
+                            "综合控制效率 (%)",
+                            min_value=0, max_value=99,
+                            value=int(activity_data.control_efficiency) if activity_data else 15,
+                            step=1,
+                            key=f"ctrl_{industry_name}"
+                        )
+                        factor_params = {'purifier_efficiency': purifier_eff}
+
+                        eff_range = np.linspace(0, 95, 100)
+                        factor_vals = [0.24 * (1 - e/100) + 0.012 * e/100 for e in eff_range]
+                        factor_vals = [max(f, 0.012) for f in factor_vals]
+                        img_buf = viz.emission_factor_curve(
+                            eff_range, factor_vals,
+                            "净化器效率 (%)", "排放因子 (kg/万元营业额)",
+                            f"{industry_name} - 排放因子曲线"
+                        )
+                        st.image(img_buf, use_container_width=True)
+
+                    if st.button(f"💾 保存{industry_name}配置", key=f"save_{industry_name}"):
+                        activity_level = locals().get(
+                            f"{['coal_amount', 'vehicle_count', 'site_area', 'biomass_amount', 'revenue'][idx]}",
+                            0.0
+                        )
+                        inventory.set_activity_level(
+                            industry_name,
+                            activity_level,
+                            control_eff,
+                            **factor_params
+                        )
+                        st.success(f"✅ {industry_name}配置已保存")
+
+        st.markdown('---')
+        st.markdown('<p class="section-header">排放清单结果</p>', unsafe_allow_html=True)
+
+        if st.button("🔄 重新计算排放量", type="primary"):
+            inventory.calculate_all_emissions()
+            st.success("✅ 排放量计算完成")
+
+        inventory.calculate_all_emissions()
+        emissions_df = inventory.get_emissions_dataframe()
+        st.dataframe(emissions_df, use_container_width=True)
+
+        col_vis1, col_vis2 = st.columns(2)
+        with col_vis1:
+            img_buf = viz.emission_bar_chart(
+                emissions_df['行业名'].tolist(),
+                emissions_df['排放量(吨/年)'].tolist(),
+                title="各行业PM2.5排放量"
+            )
+            st.image(img_buf, use_container_width=True)
+
+        with col_vis2:
+            img_buf = viz.emission_pie_chart(
+                emissions_df['行业名'].tolist(),
+                emissions_df['排放量(吨/年)'].tolist(),
+                title="各行业PM2.5排放占比"
+            )
+            st.image(img_buf, use_container_width=True)
+
+    with tab2:
+        st.markdown('<p class="section-header">减排情景模拟</p>', unsafe_allow_html=True)
+        st.info("创建减排情景，设定各行业的减排措施，系统将预测PM2.5浓度变化。考虑非线性饱和约束，最大削减量不超过当前浓度的85%。")
+
+        col_sc1, col_sc2 = st.columns([1, 1])
+
+        with col_sc1:
+            st.markdown("**创建新情景**")
+            scenario_name = st.text_input("情景名称", value="情景A")
+            scenario_desc = st.text_area("情景描述", value="")
+
+            st.markdown("**添加减排措施**")
+            measure_industry = st.selectbox(
+                "选择行业",
+                industries,
+                key="measure_industry"
+            )
+            measure_type = st.selectbox(
+                "减排措施类型",
+                ["活动水平减排", "提高控制效率", "调整排放因子参数"],
+                key="measure_type"
+            )
+
+            if measure_type == "活动水平减排":
+                reduction_pct = st.slider(
+                    "活动水平削减比例 (%)",
+                    min_value=0, max_value=99,
+                    value=30,
+                    key="red_pct"
+                )
+                measure = ReductionMeasure(
+                    industry_name=measure_industry,
+                    measure_type="activity_reduction",
+                    parameter="activity_level",
+                    value=reduction_pct,
+                    description=f"活动水平削减{reduction_pct}%"
+                )
+            elif measure_type == "提高控制效率":
+                new_control_eff = st.slider(
+                    "新的控制效率 (%)",
+                    min_value=0, max_value=99,
+                    value=60,
+                    key="new_ctrl_eff"
+                )
+                measure = ReductionMeasure(
+                    industry_name=measure_industry,
+                    measure_type="control_efficiency",
+                    parameter="control_efficiency",
+                    value=new_control_eff,
+                    description=f"控制效率提高到{new_control_eff}%"
+                )
+            else:
+                if measure_industry == "燃煤电厂":
+                    param_name = "desulfurization_efficiency"
+                    param_value = st.slider(
+                        "脱硫效率 (%)",
+                        min_value=0, max_value=99,
+                        value=90,
+                        key="param_desulf"
+                    )
+                    desc = f"脱硫效率提高到{param_value}%"
+                elif measure_industry == "机动车":
+                    param_name = "emission_standard"
+                    std_options = ['国III', '国IV', '国V', '国VI']
+                    param_value = st.selectbox(
+                        "升级到排放标准",
+                        std_options,
+                        index=2,
+                        key="param_std"
+                    )
+                    desc = f"排放标准升级到{param_value}"
+                elif measure_industry == "工地扬尘":
+                    param_name = "coverage_rate"
+                    param_value = st.slider(
+                        "覆盖率 (%)",
+                        min_value=0, max_value=100,
+                        value=80,
+                        key="param_cov"
+                    )
+                    desc = f"覆盖率提高到{param_value}%"
+                elif measure_industry == "生物质燃烧":
+                    param_name = "crop_type"
+                    crop_options = ['稻草', '麦秆', '玉米秸秆']
+                    param_value = st.selectbox(
+                        "秸秆类型",
+                        crop_options,
+                        index=1,
+                        key="param_crop"
+                    )
+                    desc = f"秸秆类型改为{param_value}"
+                else:
+                    param_name = "purifier_efficiency"
+                    param_value = st.slider(
+                        "油烟净化器效率 (%)",
+                        min_value=0, max_value=95,
+                        value=90,
+                        key="param_pur"
+                    )
+                    desc = f"净化器效率提高到{param_value}%"
+
+                measure = ReductionMeasure(
+                    industry_name=measure_industry,
+                    measure_type="factor_param",
+                    parameter=param_name,
+                    value=param_value,
+                    description=desc
+                )
+
+            col_add1, col_add2 = st.columns(2)
+            with col_add1:
+                if st.button("➕ 添加措施到情景", key="add_measure"):
+                    if scenario_name not in scenario_engine.scenarios:
+                        scenario_engine.create_scenario(scenario_name, scenario_desc)
+                    scenario_engine.add_measure_to_scenario(scenario_name, measure)
+                    st.success(f"✅ 措施已添加到情景 '{scenario_name}'")
+
+            with col_add2:
+                if st.button("🆕 创建空白情景", key="new_scenario"):
+                    if scenario_name and scenario_name not in scenario_engine.scenarios:
+                        scenario_engine.create_scenario(scenario_name, scenario_desc)
+                        st.success(f"✅ 情景 '{scenario_name}' 已创建")
+                    elif scenario_name in scenario_engine.scenarios:
+                        st.warning(f"⚠️ 情景 '{scenario_name}' 已存在")
+
+        with col_sc2:
+            st.markdown("**已创建情景**")
+            scenario_names = list(scenario_engine.scenarios.keys())
+
+            if len(scenario_names) == 0:
+                st.info("暂无减排情景，请在左侧创建")
+            else:
+                for s_name in scenario_names:
+                    scenario = scenario_engine.get_scenario(s_name)
+                    with st.expander(f"📋 {s_name}: {scenario.description}", expanded=True):
+                        st.markdown("**减排措施:**")
+                        if scenario.measures:
+                            for i, m in enumerate(scenario.measures):
+                                st.markdown(f"{i+1}. {m.industry_name}: {m.description}")
+                        else:
+                            st.info("暂无措施")
+
+                        col_act1, col_act2 = st.columns(2)
+                        with col_act1:
+                            if st.button(f"🔍 模拟{s_name}", key=f"sim_{s_name}"):
+                                result = scenario_engine.simulate_scenario(s_name)
+                                if result:
+                                    st.success(f"✅ 模拟完成")
+                                    st.metric(
+                                        "预期PM2.5浓度",
+                                        f"{result.expected_concentration:.2f} μg/m³",
+                                        delta=f"-{result.reduction_percentage:.1f}%"
+                                    )
+
+                        with col_act2:
+                            if st.button(f"🗑️ 删除{s_name}", key=f"del_{s_name}"):
+                                scenario_engine.delete_scenario(s_name)
+                                st.rerun()
+
+        st.markdown('---')
+        st.markdown('<p class="section-header">情景对比分析</p>', unsafe_allow_html=True)
+
+        if st.button("▶️ 运行所有情景模拟", type="primary"):
+            scenario_engine.simulate_all_scenarios()
+            st.success("✅ 所有情景模拟完成")
+
+        scenario_results = scenario_engine.get_scenario_results_dataframe()
+        if len(scenario_results) > 0:
+            st.dataframe(scenario_results, use_container_width=True)
+
+            comparison_data = scenario_engine.get_comparison_data()
+            scenario_names_list = list(comparison_data.keys())
+            expected_concs = [comparison_data[s]['expected'] for s in scenario_names_list]
+
+            if len(scenario_names_list) > 0:
+                img_buf = viz.scenario_comparison_bar(
+                    scenario_names_list,
+                    current_pm25,
+                    expected_concs,
+                    title="减排情景对比 - PM2.5浓度预测"
+                )
+                st.image(img_buf, use_container_width=True)
+
+                industry_reductions = {}
+                for s_name in scenario_names_list:
+                    scenario = scenario_engine.get_scenario(s_name)
+                    for industry in industries:
+                        if industry not in industry_reductions:
+                            industry_reductions[industry] = []
+                        reduction = scenario.emission_reductions.get(industry, 0.0)
+                        industry_reductions[industry].append(reduction)
+
+                if any(sum(v) > 0 for v in industry_reductions.values()):
+                    img_buf = viz.reduction_measures_bar(
+                        scenario_names_list,
+                        industry_reductions,
+                        title="各行业减排贡献"
+                    )
+                    st.image(img_buf, use_container_width=True)
+
+                st.markdown("### 📈 饱和效应说明")
+                st.info(
+                    "本系统采用Logistic函数模拟减排的非线性饱和效应：\n\n"
+                    "**实际削减 = 理论削减 × 85% / (85% + 理论削减)**\n\n"
+                    "当减排量超过一定阈值后，浓度下降速率会逐渐减缓，最大削减量不超过当前浓度的85%。"
+                    "这反映了现实中PM2.5浓度受背景浓度、跨区域传输等因素影响，不可能完全消除。"
+                )
+        else:
+            st.info("请先创建并运行减排情景")
+
+    with tab3:
+        st.markdown('<p class="section-header">清单校验与平衡</p>', unsafe_allow_html=True)
+        st.info("对比自下而上计算的排放清单与自上而下由源解析反推的源贡献，进行质量平衡校验。")
+
+        if st.session_state.last_result is None:
+            st.warning("⚠️ 尚未完成源解析分析，无法进行自上而下的校验。请先在'源解析分析'页面运行解析算法。")
+        else:
+            st.success(f"✅ 已获取源解析结果，共识别 {len(source_contribs)} 个源类")
+
+            contrib_df = pd.DataFrame([
+                {'源类': k, '平均贡献浓度 (μg/m³)': round(v, 4)}
+                for k, v in source_contribs.items()
+            ])
+            st.dataframe(contrib_df, use_container_width=True)
+
+            if st.button("⚖️ 执行清单校验", type="primary"):
+                validation_df = inventory.get_validation_dataframe()
+                st.session_state.validation_result = validation_df
+                st.success("✅ 清单校验完成")
+
+            if 'validation_result' in st.session_state:
+                validation_df = st.session_state.validation_result
+
+                col_val1, col_val2 = st.columns([2, 1])
+                with col_val1:
+                    st.markdown("**校验结果表**")
+
+                    def color_status(val):
+                        if val == 'red':
+                            return 'background-color: #ffcccc; color: #d62728'
+                        elif val == 'yellow':
+                            return 'background-color: #fff3cc; color: #ff7f0e'
+                        else:
+                            return 'background-color: #ccffcc; color: #2ca02c'
+
+                    styled_df = validation_df.style.applymap(
+                        color_status, subset=['状态']
+                    ).format({
+                        '自下而上(吨/年)': '{:.4f}',
+                        '自上而下(吨/年)': '{:.4f}',
+                        '偏差率(%)': '{:.2f}'
+                    })
+                    st.dataframe(styled_df, use_container_width=True)
+
+                    st.markdown("**校验规则说明:**")
+                    col_r1, col_r2, col_r3 = st.columns(3)
+                    with col_r1:
+                        st.markdown('<div style="background-color: #ccffcc; padding: 10px; border-radius: 5px;">'
+                                   '<span style="color: #2ca02c; font-weight: bold;">🟢 偏差 ≤ ±30%</span><br>'
+                                   '清单质量良好</div>',
+                                   unsafe_allow_html=True)
+                    with col_r2:
+                        st.markdown('<div style="background-color: #fff3cc; padding: 10px; border-radius: 5px;">'
+                                   '<span style="color: #ff7f0e; font-weight: bold;">🟡 ±30% < 偏差 ≤ ±50%</span><br>'
+                                   '需要关注并核实</div>',
+                                   unsafe_allow_html=True)
+                    with col_r3:
+                        st.markdown('<div style="background-color: #ffcccc; padding: 10px; border-radius: 5px;">'
+                                   '<span style="color: #d62728; font-weight: bold;">🔴 偏差 > ±50%</span><br>'
+                                   '必须重新核查</div>',
+                                   unsafe_allow_html=True)
+
+                with col_val2:
+                    st.markdown("**偏差仪表盘**")
+                    img_buf = viz.validation_gauge_chart(
+                        validation_df['行业名'].tolist(),
+                        validation_df['偏差率(%)'].tolist(),
+                        validation_df['状态'].tolist(),
+                        title="各行业偏差率"
+                    )
+                    st.image(img_buf, use_container_width=True)
+
+                issues = validation_df[validation_df['状态'] != 'green']
+                if len(issues) > 0:
+                    st.markdown("### ⚠️ 需要关注的行业")
+                    for _, row in issues.iterrows():
+                        if row['状态'] == 'red':
+                            st.error(f"🔴 **{row['行业名']}**: 偏差率 {row['偏差率(%)']:.1f}%，"
+                                    f"自下而上: {row['自下而上(吨/年)']:.2f}吨/年 vs "
+                                    f"自上而下: {row['自上而下(吨/年)']:.2f}吨/年")
+                        else:
+                            st.warning(f"🟡 **{row['行业名']}**: 偏差率 {row['偏差率(%)']:.1f}%，"
+                                      f"自下而上: {row['自下而上(吨/年)']:.2f}吨/年 vs "
+                                      f"自上而下: {row['自上而下(吨/年)']:.2f}吨/年")
+                else:
+                    st.success("✅ 所有行业偏差率均在合理范围内，清单质量良好！")
+
+    with tab4:
+        st.markdown('<p class="section-header">数据导出</p>', unsafe_allow_html=True)
+        st.info("将排放清单和情景模拟结果导出为CSV格式。")
+
+        col_exp1, col_exp2 = st.columns(2)
+
+        with col_exp1:
+            st.markdown("**排放清单导出**")
+            inventory.calculate_all_emissions()
+            export_inventory_df = inventory.get_emissions_dataframe()
+
+            export_cols = ['行业名', '活动水平', '排放因子', '控制效率(%)', '排放量(吨/年)']
+            export_df = export_inventory_df[export_cols].rename(columns={
+                '控制效率(%)': '控制效率'
+            })
+
+            csv_inventory = export_df.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(
+                label="📥 下载排放清单CSV",
+                data=csv_inventory,
+                file_name="排放清单.csv",
+                mime="text/csv",
+                type="primary"
+            )
+
+            st.dataframe(export_df, use_container_width=True)
+
+        with col_exp2:
+            st.markdown("**情景模拟结果导出**")
+            scenario_results_df = scenario_engine.get_scenario_results_dataframe()
+
+            if len(scenario_results_df) > 0:
+                export_scenario_cols = ['情景名', '减排措施', '预期PM2.5浓度(μg/m³)', '削减幅度(%)']
+                export_scenario_df = scenario_results_df[export_scenario_cols]
+
+                csv_scenario = export_scenario_df.to_csv(index=False).encode('utf-8-sig')
+                st.download_button(
+                    label="📥 下载情景模拟结果CSV",
+                    data=csv_scenario,
+                    file_name="情景模拟结果.csv",
+                    mime="text/csv",
+                    type="primary"
+                )
+
+                st.dataframe(export_scenario_df, use_container_width=True)
+            else:
+                st.info("请先创建并运行减排情景")
+
+        st.markdown('---')
+        st.markdown("### 📋 导出说明")
+        st.info(
+            "**排放清单CSV字段说明:**\n"
+            "- 行业名: 排放源行业分类\n"
+            "- 活动水平: 经济活动数据（燃煤量、机动车保有量等）\n"
+            "- 排放因子: 单位活动水平的PM2.5排放量\n"
+            "- 控制效率: 污染治理设施的去除效率 (%)\n"
+            "- 排放量: PM2.5年排放量 (吨/年)\n\n"
+            "**情景模拟CSV字段说明:**\n"
+            "- 情景名: 减排情景名称\n"
+            "- 减排措施: 各行业采取的具体减排措施\n"
+            "- 预期PM2.5浓度: 模拟后的PM2.5浓度 (μg/m³)\n"
+            "- 削减幅度: 相对于基准浓度的削减比例 (%)"
+        )
+
+
 elif page == "报告导出":
     st.markdown('<p class="main-header">📄 报告导出</p>', unsafe_allow_html=True)
 
@@ -2226,7 +2878,9 @@ st.sidebar.info(
     "1. 在「数据管理」导入监测数据\n"
     "2. 在「源谱库管理」查看和管理源谱\n"
     "3. 在「源解析分析」运行解析算法\n"
-    "4. 在「后向轨迹」做潜在源区分析\n"
-    "5. 在「多站点对比」对比分析\n"
-    "6. 在「报告导出」生成PDF报告"
+    "4. 在「排放清单编制」编制排放清单\n"
+    "5. 在「减排情景模拟」预测浓度变化\n"
+    "6. 在「后向轨迹」做潜在源区分析\n"
+    "7. 在「多站点对比」对比分析\n"
+    "8. 在「报告导出」生成PDF报告"
 )
