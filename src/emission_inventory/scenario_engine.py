@@ -212,6 +212,13 @@ class ScenarioSimulationEngine:
     def get_scenario(self, scenario_name: str) -> Optional[Scenario]:
         return self.scenarios.get(scenario_name)
 
+    def _saturation_correction_increase(self, theoretical_increase_ratio: float) -> float:
+        max_increase_ratio = 2.0
+        if theoretical_increase_ratio <= 0:
+            return 0.0
+        actual_ratio = max_increase_ratio * (1 - np.exp(-theoretical_increase_ratio / 0.3))
+        return actual_ratio
+
     def simulate_single_perturbation(
         self,
         industry_name: str,
@@ -237,7 +244,9 @@ class ScenarioSimulationEngine:
                 if param_type == "activity_level":
                     current_activity.activity_level = base_activity.activity_level * (1 + perturbation_pct / 100.0)
                 elif param_type == "control_efficiency":
-                    new_eff = base_activity.control_efficiency * (1 + perturbation_pct / 100.0)
+                    base_eff = base_activity.control_efficiency
+                    eff_change = perturbation_pct / 100.0 * 99.0
+                    new_eff = base_eff + eff_change
                     current_activity.control_efficiency = np.clip(new_eff, 0.0, 99.0)
 
             factor_params = current_activity.factor_params
@@ -283,9 +292,15 @@ class ScenarioSimulationEngine:
         else:
             theoretical_reduction_ratio = 0.0
 
-        actual_reduction_ratio = self._saturation_correction(theoretical_reduction_ratio)
-        actual_reduction = actual_reduction_ratio * self.current_pm25_concentration
-        expected_concentration = self.current_pm25_concentration - actual_reduction
+        if theoretical_reduction_ratio >= 0:
+            actual_reduction_ratio = self._saturation_correction(theoretical_reduction_ratio)
+            actual_concentration_change = -actual_reduction_ratio * self.current_pm25_concentration
+        else:
+            theoretical_increase_ratio = -theoretical_reduction_ratio
+            actual_increase_ratio = self._saturation_correction_increase(theoretical_increase_ratio)
+            actual_concentration_change = actual_increase_ratio * self.current_pm25_concentration
+
+        expected_concentration = self.current_pm25_concentration + actual_concentration_change
         concentration_change_pct = (expected_concentration - self.current_pm25_concentration) / self.current_pm25_concentration * 100 if self.current_pm25_concentration > 0 else 0
 
         return {

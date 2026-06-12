@@ -47,11 +47,27 @@ class EmissionInventoryCalculator:
             "生物质燃烧": 50.0,
             "餐饮油烟": 50000.0,
         }
+        default_control_efficiencies = {
+            "燃煤电厂": 30.0,
+            "机动车": 10.0,
+            "工地扬尘": 20.0,
+            "生物质燃烧": 5.0,
+            "餐饮油烟": 15.0,
+        }
+        default_factor_params = {
+            "燃煤电厂": {'desulfurization_efficiency': 70},
+            "机动车": {'emission_standard': '国IV', 'annual_vkm': 15000},
+            "工地扬尘": {'coverage_rate': 50},
+            "生物质燃烧": {'crop_type': '稻草'},
+            "餐饮油烟": {'purifier_efficiency': 60},
+        }
         for name in self.factor_library.get_all_industries():
             self.industries[name] = IndustryActivityData(
                 industry_name=name,
                 activity_level=default_activities.get(name, 0.0),
                 activity_unit=default_units.get(name, ""),
+                control_efficiency=default_control_efficiencies.get(name, 0.0),
+                factor_params=default_factor_params.get(name, {}),
             )
 
     def set_activity_level(self, industry_name: str, activity_level: float,
