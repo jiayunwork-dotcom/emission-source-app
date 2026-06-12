@@ -116,9 +116,17 @@ class GaussianPlumeModel:
         if H < 1.0:
             z_term = 2 * np.exp(-0.5 * (z / sigma_z) ** 2)
         else:
-            z_direct = np.exp(-0.5 * ((z - H) / sigma_z) ** 2)
-            z_reflect = np.exp(-0.5 * ((z + H) / sigma_z) ** 2)
-            z_term = z_direct + z_reflect
+            h = self.mixing_height
+            if h <= 0:
+                z_direct = np.exp(-0.5 * ((z - H) / sigma_z) ** 2)
+                z_reflect = np.exp(-0.5 * ((z + H) / sigma_z) ** 2)
+                z_term = z_direct + z_reflect
+            else:
+                z_term = 0.0
+                for n in range(-3, 4):
+                    z_direct = np.exp(-0.5 * ((z - H + 2 * n * h) / sigma_z) ** 2)
+                    z_reflect = np.exp(-0.5 * ((z + H + 2 * n * h) / sigma_z) ** 2)
+                    z_term += z_direct + z_reflect
 
         return term1 * y_term * z_term
 
@@ -132,7 +140,7 @@ class GaussianPlumeModel:
         dx = x_grid - source_x
         dy = y_grid - source_y
 
-        theta_rad = np.radians(self.wind_direction - 180.0)
+        theta_rad = np.radians(270.0 - self.wind_direction)
         cos_theta = np.cos(theta_rad)
         sin_theta = np.sin(theta_rad)
 
