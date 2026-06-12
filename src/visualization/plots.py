@@ -906,3 +906,246 @@ class Visualizer:
 
         plt.tight_layout()
         return self._fig_to_bytes(fig)
+
+    def concentration_heatmap(
+        self,
+        concentration_field: np.ndarray,
+        x_grid: np.ndarray,
+        y_grid: np.ndarray,
+        sources: Optional[List[Dict]] = None,
+        wind_direction: Optional[float] = None,
+        title: str = "PM2.5浓度空间分布",
+        cmap: str = 'YlOrRd',
+        vmin: Optional[float] = None,
+        vmax: Optional[float] = None,
+    ) -> BytesIO:
+        fig, ax = plt.subplots(figsize=(10, 8))
+
+        if vmax is None:
+            vmax = np.percentile(concentration_field, 99)
+        if vmin is None:
+            vmin = concentration_field.min()
+
+        im = ax.contourf(
+            x_grid, y_grid, concentration_field,
+            levels=20,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            extend='both',
+        )
+
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label('PM2.5浓度 (μg/m³)', fontsize=11)
+
+        if sources is not None:
+            markers = ['o', 's', '^', 'D', 'v', 'p', '*', 'h']
+            colors_src = COLORS[:len(sources)]
+            for i, src in enumerate(sources):
+                marker = markers[i % len(markers)]
+                ax.scatter(
+                    src['x'], src['y'],
+                    marker=marker,
+                    s=150,
+                    color=colors_src[i],
+                    edgecolors='black',
+                    linewidth=1.5,
+                    zorder=10,
+                    label=src['name'],
+                )
+                ax.annotate(
+                    src['name'],
+                    (src['x'], src['y']),
+                    xytext=(10, 10),
+                    textcoords='offset points',
+                    fontsize=9,
+                    fontweight='bold',
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8),
+                )
+            ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=9)
+
+        if wind_direction is not None:
+            theta_rad = np.radians(wind_direction)
+            arrow_x = np.cos(theta_rad) * 3
+            arrow_y = np.sin(theta_rad) * 3
+            ax.annotate(
+                '',
+                xy=(arrow_x, arrow_y),
+                xytext=(0, 0),
+                arrowprops=dict(arrowstyle='->', color='blue', lw=2.5),
+            )
+            ax.text(
+                arrow_x * 1.2, arrow_y * 1.2,
+                f'风向 {wind_direction:.0f}°',
+                color='blue',
+                fontsize=10,
+                fontweight='bold',
+                ha='center',
+                va='center',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8),
+            )
+
+        ax.set_xlabel('东西向距离 (km)', fontsize=12)
+        ax.set_ylabel('南北向距离 (km)', fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.set_aspect('equal')
+        ax.grid(True, alpha=0.3, linestyle='--')
+
+        plt.tight_layout()
+        return self._fig_to_bytes(fig)
+
+    def concentration_heatmap_comparison(
+        self,
+        conc_field_1: np.ndarray,
+        x_grid_1: np.ndarray,
+        y_grid_1: np.ndarray,
+        conc_field_2: np.ndarray,
+        x_grid_2: np.ndarray,
+        y_grid_2: np.ndarray,
+        title_1: str = "工况1",
+        title_2: str = "工况2",
+        sources: Optional[List[Dict]] = None,
+        cmap: str = 'YlOrRd',
+    ) -> BytesIO:
+        fig, axes = plt.subplots(1, 2, figsize=(18, 7))
+
+        vmax = max(np.percentile(conc_field_1, 99), np.percentile(conc_field_2, 99))
+        vmin = min(conc_field_1.min(), conc_field_2.min())
+
+        for ax, conc, xg, yg, title in zip(
+            axes,
+            [conc_field_1, conc_field_2],
+            [x_grid_1, x_grid_2],
+            [y_grid_1, y_grid_2],
+            [title_1, title_2],
+        ):
+            im = ax.contourf(
+                xg, yg, conc,
+                levels=20,
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
+                extend='both',
+            )
+            ax.set_xlabel('东西向距离 (km)', fontsize=11)
+            ax.set_ylabel('南北向距离 (km)', fontsize=11)
+            ax.set_title(title, fontsize=13, fontweight='bold')
+            ax.set_aspect('equal')
+            ax.grid(True, alpha=0.3, linestyle='--')
+
+            if sources is not None:
+                markers = ['o', 's', '^', 'D', 'v', 'p', '*', 'h']
+                colors_src = COLORS[:len(sources)]
+                for i, src in enumerate(sources):
+                    marker = markers[i % len(markers)]
+                    ax.scatter(
+                        src['x'], src['y'],
+                        marker=marker,
+                        s=100,
+                        color=colors_src[i],
+                        edgecolors='black',
+                        linewidth=1,
+                        zorder=10,
+                    )
+
+        cbar = fig.colorbar(im, ax=axes, shrink=0.8)
+        cbar.set_label('PM2.5浓度 (μg/m³)', fontsize=11)
+
+        fig.suptitle('气象参数对比分析', fontsize=15, fontweight='bold')
+        plt.tight_layout()
+        return self._fig_to_bytes(fig)
+
+    def centerline_decay_curve(
+        self,
+        distances: np.ndarray,
+        concentrations: np.ndarray,
+        source_name: str,
+        background_concentration: float = 5.0,
+        influence_radius: Optional[float] = None,
+        title: Optional[str] = None,
+    ) -> BytesIO:
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        ax.plot(
+            distances, concentrations,
+            'b-', linewidth=2.5, label='中心线浓度',
+        )
+        ax.fill_between(
+            distances, concentrations,
+            alpha=0.3, color='#1f77b4',
+        )
+
+        ax.axhline(
+            y=background_concentration,
+            color='red',
+            linestyle='--',
+            linewidth=1.5,
+            alpha=0.8,
+            label=f'背景浓度 ({background_concentration:.1f} μg/m³)',
+        )
+
+        if influence_radius is not None and influence_radius < distances.max():
+            ax.axvline(
+                x=influence_radius,
+                color='green',
+                linestyle='--',
+                linewidth=1.5,
+                alpha=0.8,
+                label=f'影响半径 ({influence_radius:.1f} km)',
+            )
+            ax.scatter(
+                [influence_radius], [background_concentration],
+                color='green', s=100, zorder=5,
+                edgecolors='black', linewidth=1,
+            )
+
+        ax.set_xlabel('下风向距离 (km)', fontsize=12)
+        ax.set_ylabel('PM2.5浓度 (μg/m³)', fontsize=12)
+        if title is None:
+            title = f'{source_name} - 下风向中心线浓度衰减'
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.legend(fontsize=10)
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(0, distances.max())
+        ax.set_ylim(bottom=0)
+
+        plt.tight_layout()
+        return self._fig_to_bytes(fig)
+
+    def source_contribution_bar(
+        self,
+        source_names: List[str],
+        contributions: List[float],
+        title: str = "各源最大浓度点贡献占比",
+    ) -> BytesIO:
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        total = sum(contributions)
+        if total > 0:
+            percentages = [c / total * 100 for c in contributions]
+        else:
+            percentages = [0] * len(contributions)
+
+        colors = COLORS[:len(source_names)]
+        bars = ax.bar(source_names, percentages, color=colors, alpha=0.85, edgecolor='black', linewidth=0.5)
+
+        for bar, pct, contrib in zip(bars, percentages, contributions):
+            height = bar.get_height()
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                height,
+                f'{pct:.1f}%\n({contrib:.2f} μg/m³)',
+                ha='center',
+                va='bottom',
+                fontsize=10,
+                fontweight='bold',
+            )
+
+        ax.set_xlabel('排放源', fontsize=12)
+        ax.set_ylabel('贡献占比 (%)', fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.set_xticklabels(source_names, rotation=30, ha='right')
+        ax.grid(True, alpha=0.3, axis='y')
+
+        plt.tight_layout()
+        return self._fig_to_bytes(fig)

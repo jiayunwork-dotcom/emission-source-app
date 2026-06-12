@@ -21,6 +21,7 @@ from src.emission_inventory import (
     ScenarioSimulationEngine,
 )
 from src.emission_inventory.scenario_engine import ReductionMeasure
+from src.dispersion import GaussianPlumeModel, EmissionSource
 
 
 st.set_page_config(
@@ -105,6 +106,12 @@ if 'emission_inventory_warning_shown' not in st.session_state:
     st.session_state.emission_inventory_warning_shown = False
 if 'source_to_industry_mapping' not in st.session_state:
     st.session_state.source_to_industry_mapping = {}
+if 'dispersion_result' not in st.session_state:
+    st.session_state.dispersion_result = None
+if 'dispersion_comparison_result' not in st.session_state:
+    st.session_state.dispersion_comparison_result = None
+if 'dispersion_sources_config' not in st.session_state:
+    st.session_state.dispersion_sources_config = None
 
 
 st.sidebar.title("🌫️ 工业废气排放源解析系统")
@@ -2174,11 +2181,12 @@ elif page == "排放清单编制与情景模拟":
 
     st.info(f"📊 当前实测PM2.5平均浓度: **{current_pm25:.2f} μg/m³**")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📝 排放清单编制",
         "🌱 减排情景模拟",
         "⚖️ 清单校验与平衡",
         "📊 敏感性分析",
+        "💨 大气扩散模拟",
         "📤 数据导出"
     ])
 
@@ -3005,6 +3013,372 @@ elif page == "排放清单编制与情景模拟":
             st.markdown(f"**基准PM2.5浓度:** {baseline_pm25:.2f} μg/m³")
 
     with tab5:
+        st.markdown('<p class="section-header">大气扩散模拟</p>', unsafe_allow_html=True)
+        st.info("基于高斯烟羽模型模拟各排放源在特定气象条件下对周边区域PM2.5浓度的空间贡献分布。")
+
+        inventory.calculate_all_emissions()
+        emissions_df = inventory.get_emissions_dataframe()
+
+        default_source_config = {
+            "燃煤电厂": {"x": 2.0, "y": 3.0, "height": 200.0},
+            "机动车": {"x": 0.0, "y": -1.0, "height": 0.0},
+            "工地扬尘": {"x": -1.0, "y": 2.0, "height": 5.0},
+            "生物质燃烧": {"x": 3.0, "y": -2.0, "height": 10.0},
+            "餐饮油烟": {"x": -2.0, "y": -1.0, "height": 15.0},
+        }
+
+        if st.session_state.dispersion_sources_config is None:
+            sources_config = []
+            for _, row in emissions_df.iterrows():
+                ind_name = row['行业名']
+                emission_ton_per_year = row['排放量(吨/年)']
+                emission_g_per_s = emission_ton_per_year * 1e6 / (365 * 24 * 3600)
+                cfg = default_source_config.get(ind_name, {"x": 0.0, "y": 0.0, "height": 50.0})
+                sources_config.append({
+                    'name': ind_name,
+                    'source_strength': emission_g_per_s,
+                    'effective_height': cfg['height'],
+                    'x': cfg['x'],
+                    'y': cfg['y'],
+                })
+            st.session_state.dispersion_sources_config = sources_config
+
+        col_disp_left, col_disp_right = st.columns([1, 2])
+
+        with col_disp_left:
+            st.markdown("**🌤️ 气象参数设置**")
+
+            wind_speed = st.slider(
+                "风速 (m/s)",
+                min_value=0.5,
+                max_value=20.0,
+                value=3.0,
+                step=0.5,
+                help="近地面风速，影响污染物扩散速率",
+            )
+            wind_direction = st.slider(
+                "风向 (°)",
+                min_value=0,
+                max_value=360,
+                value=225,
+                step=5,
+                help="0°为北风，90°为东风，180°为南风，270°为西风",
+            )
+            stability_class = st.selectbox(
+                "大气稳定度等级",
+                ['A', 'B', 'C', 'D', 'E', 'F'],
+                index=3,
+                help="A:极不稳定 B:不稳定 C:弱不稳定 D:中性 E:弱稳定 F:稳定",
+            )
+            mixing_height = st.slider(
+                "混合层高度 (m)",
+                min_value=200,
+                max_value=3000,
+                value=800,
+                step=50,
+                help="大气垂直混合的最大高度",
+            )
+            temperature = st.slider(
+                "环境温度 (°C)",
+                min_value=-20,
+                max_value=45,
+                value=20,
+                step=1,
+            )
+            background_conc = st.slider(
+                "背景浓度 (μg/m³)",
+                min_value=0.0,
+                max_value=35.0,
+                value=5.0,
+                step=0.5,
+            )
+
+            st.markdown("---")
+            st.markdown("**🏭 排放源配置**")
+
+            sources_df = pd.DataFrame(st.session_state.dispersion_sources_config)
+            sources_df_display = sources_df.rename(columns={
+                'name': '排放源',
+                'source_strength': '源强(g/s)',
+                'effective_height': '烟囱高度(m)',
+                'x': 'X坐标(km)',
+                'y': 'Y坐标(km)',
+            })
+
+            edited_sources_df = st.data_editor(
+                sources_df_display,
+                use_container_width=True,
+                hide_index=True,
+                disabled=['排放源', '源强(g/s)'],
+                column_config={
+                    '烟囱高度(m)': st.column_config.NumberColumn(min_value=0, max_value=1000, step=1),
+                    'X坐标(km)': st.column_config.NumberColumn(min_value=-10, max_value=10, step=0.1),
+                    'Y坐标(km)': st.column_config.NumberColumn(min_value=-10, max_value=10, step=0.1),
+                }
+            )
+
+            if st.button("💾 保存排放源配置"):
+                updated_config = []
+                for i, row in edited_sources_df.iterrows():
+                    updated_config.append({
+                        'name': row['排放源'],
+                        'source_strength': row['源强(g/s)'],
+                        'effective_height': row['烟囱高度(m)'],
+                        'x': row['X坐标(km)'],
+                        'y': row['Y坐标(km)'],
+                    })
+                st.session_state.dispersion_sources_config = updated_config
+                st.success("✅ 排放源配置已保存")
+
+            st.markdown("---")
+            st.markdown("**📊 单源贡献分析**")
+            source_names = [s['name'] for s in st.session_state.dispersion_sources_config]
+            all_sources_option = ["全部源叠加"] + source_names
+            selected_view_source = st.selectbox(
+                "选择显示单个源或全部叠加",
+                all_sources_option,
+                index=0,
+            )
+
+            st.markdown("---")
+            st.markdown("**⚡ 快速对比**")
+            compare_param = st.selectbox(
+                "选择对比参数",
+                ["风速", "稳定度", "混合层高度"],
+                index=0,
+            )
+            if compare_param == "风速":
+                val1_compare = st.slider("对比值1 (m/s)", 0.5, 20.0, 3.0, 0.5, key="comp_wind1")
+                val2_compare = st.slider("对比值2 (m/s)", 0.5, 20.0, 8.0, 0.5, key="comp_wind2")
+            elif compare_param == "稳定度":
+                val1_compare = st.selectbox("对比值1", ['A', 'B', 'C', 'D', 'E', 'F'], index=0, key="comp_stab1")
+                val2_compare = st.selectbox("对比值2", ['A', 'B', 'C', 'D', 'E', 'F'], index=3, key="comp_stab2")
+            else:
+                val1_compare = st.slider("对比值1 (m)", 200, 3000, 500, 50, key="comp_mix1")
+                val2_compare = st.slider("对比值2 (m)", 200, 3000, 1500, 50, key="comp_mix2")
+
+            col_run1, col_run2 = st.columns(2)
+            with col_run1:
+                if st.button("▶️ 运行模拟", type="primary", use_container_width=True):
+                    with st.spinner("正在运行高斯烟羽模拟..."):
+                        sources = []
+                        for cfg in st.session_state.dispersion_sources_config:
+                            sources.append(EmissionSource(
+                                name=cfg['name'],
+                                source_strength=cfg['source_strength'],
+                                effective_height=cfg['effective_height'],
+                                x=cfg['x'],
+                                y=cfg['y'],
+                            ))
+
+                        model = GaussianPlumeModel(
+                            wind_speed=wind_speed,
+                            wind_direction=wind_direction,
+                            stability_class=stability_class,
+                            mixing_height=mixing_height,
+                            temperature=temperature,
+                            background_concentration=background_conc,
+                        )
+                        model.set_sources(sources)
+
+                        sel_src = None if selected_view_source == "全部源叠加" else selected_view_source
+                        result = model.simulate(selected_source=sel_src)
+                        st.session_state.dispersion_result = {
+                            'result': result,
+                            'model': model,
+                            'selected_source': sel_src,
+                        }
+                        st.success("✅ 模拟完成")
+
+            with col_run2:
+                if st.button("🔀 对比模拟", use_container_width=True):
+                    with st.spinner("正在运行对比模拟..."):
+                        sources = []
+                        for cfg in st.session_state.dispersion_sources_config:
+                            sources.append(EmissionSource(
+                                name=cfg['name'],
+                                source_strength=cfg['source_strength'],
+                                effective_height=cfg['effective_height'],
+                                x=cfg['x'],
+                                y=cfg['y'],
+                            ))
+
+                        model1 = GaussianPlumeModel(
+                            wind_speed=wind_speed,
+                            wind_direction=wind_direction,
+                            stability_class=stability_class,
+                            mixing_height=mixing_height,
+                            temperature=temperature,
+                            background_concentration=background_conc,
+                        )
+                        model2 = GaussianPlumeModel(
+                            wind_speed=wind_speed,
+                            wind_direction=wind_direction,
+                            stability_class=stability_class,
+                            mixing_height=mixing_height,
+                            temperature=temperature,
+                            background_concentration=background_conc,
+                        )
+
+                        if compare_param == "风速":
+                            model1.wind_speed = val1_compare
+                            model2.wind_speed = val2_compare
+                            title1 = f"风速 {val1_compare} m/s"
+                            title2 = f"风速 {val2_compare} m/s"
+                        elif compare_param == "稳定度":
+                            model1.stability_class = val1_compare
+                            model2.stability_class = val2_compare
+                            title1 = f"稳定度 {val1_compare}"
+                            title2 = f"稳定度 {val2_compare}"
+                        else:
+                            model1.mixing_height = val1_compare
+                            model2.mixing_height = val2_compare
+                            title1 = f"混合层高度 {val1_compare} m"
+                            title2 = f"混合层高度 {val2_compare} m"
+
+                        model1.set_sources(sources)
+                        model2.set_sources(sources)
+
+                        result1 = model1.simulate()
+                        result2 = model2.simulate()
+
+                        st.session_state.dispersion_comparison_result = {
+                            'result1': result1,
+                            'result2': result2,
+                            'title1': title1,
+                            'title2': title2,
+                            'sources_for_plot': [{'name': s.name, 'x': s.x, 'y': s.y} for s in sources],
+                        }
+                        st.success("✅ 对比模拟完成")
+
+        with col_disp_right:
+            if st.session_state.dispersion_result is not None:
+                disp_data = st.session_state.dispersion_result
+                result = disp_data['result']
+                model = disp_data['model']
+                sel_src = disp_data['selected_source']
+
+                sources_for_plot = []
+                for cfg in st.session_state.dispersion_sources_config:
+                    sources_for_plot.append({
+                        'name': cfg['name'],
+                        'x': cfg['x'],
+                        'y': cfg['y'],
+                    })
+
+                plot_title = "PM2.5浓度空间分布（全部源叠加）" if sel_src is None else f"PM2.5浓度空间分布 - {sel_src}"
+                img_buf = viz.concentration_heatmap(
+                    concentration_field=result.concentration_field,
+                    x_grid=result.x_grid,
+                    y_grid=result.y_grid,
+                    sources=sources_for_plot,
+                    wind_direction=wind_direction,
+                    title=plot_title,
+                )
+                st.image(img_buf, use_container_width=True)
+
+                col_dl1, col_dl2 = st.columns(2)
+                with col_dl1:
+                    st.download_button(
+                        label="📥 下载热力图PNG",
+                        data=img_buf.getvalue(),
+                        file_name="PM25浓度分布图.png",
+                        mime="image/png",
+                    )
+                with col_dl2:
+                    x_coords = result.x_grid[0, :]
+                    y_coords = result.y_grid[:, 0]
+                    conc_df = pd.DataFrame(
+                        result.concentration_field,
+                        index=[f"Y={y:.2f}km" for y in y_coords],
+                        columns=[f"X={x:.2f}km" for x in x_coords],
+                    )
+                    csv_data = conc_df.to_csv().encode('utf-8-sig')
+                    st.download_button(
+                        label="📥 下载浓度场CSV",
+                        data=csv_data,
+                        file_name="浓度场矩阵.csv",
+                        mime="text/csv",
+                    )
+
+                st.markdown("---")
+                st.markdown("**📈 统计信息**")
+
+                col_stat1, col_stat2, col_stat3 = st.columns(3)
+                with col_stat1:
+                    st.metric("最大地面浓度", f"{result.max_concentration:.2f} μg/m³")
+                with col_stat2:
+                    st.metric("最大浓度位置", f"({result.max_location[0]:.1f}, {result.max_location[1]:.1f}) km")
+                with col_stat3:
+                    avg_conc = np.mean(result.concentration_field)
+                    st.metric("区域平均浓度", f"{avg_conc:.2f} μg/m³")
+
+                if sel_src is None and len(result.source_contribution_at_max) > 0:
+                    st.markdown("**各源对最大浓度点的贡献占比**")
+                    contrib_names = list(result.source_contribution_at_max.keys())
+                    contrib_values = list(result.source_contribution_at_max.values())
+                    img_contrib = viz.source_contribution_bar(
+                        source_names=contrib_names,
+                        contributions=contrib_values,
+                        title="各源对最大浓度点贡献占比",
+                    )
+                    st.image(img_contrib, use_container_width=True)
+
+                if sel_src is not None:
+                    st.markdown("---")
+                    st.markdown(f"**📉 {sel_src} - 下风向中心线浓度衰减**")
+                    if sel_src in result.centerline_concentrations:
+                        cl_dist, cl_conc = result.centerline_concentrations[sel_src]
+                        influence_radius = model.get_influence_radius(sel_src)
+                        img_cl = viz.centerline_decay_curve(
+                            distances=cl_dist,
+                            concentrations=cl_conc,
+                            source_name=sel_src,
+                            background_concentration=background_conc,
+                            influence_radius=influence_radius,
+                        )
+                        st.image(img_cl, use_container_width=True)
+                        st.info(f"🎯 **{sel_src}** 影响半径约为 **{influence_radius:.1f} km**（浓度降至背景浓度以下的距离）")
+
+            else:
+                st.info("👈 请在左侧设置气象参数和排放源配置，然后点击'运行模拟'按钮")
+
+            if st.session_state.dispersion_comparison_result is not None:
+                st.markdown("---")
+                st.markdown("**⚖️ 参数敏感性对比分析**")
+                comp_data = st.session_state.dispersion_comparison_result
+                img_comp = viz.concentration_heatmap_comparison(
+                    conc_field_1=comp_data['result1'].concentration_field,
+                    x_grid_1=comp_data['result1'].x_grid,
+                    y_grid_1=comp_data['result1'].y_grid,
+                    conc_field_2=comp_data['result2'].concentration_field,
+                    x_grid_2=comp_data['result2'].x_grid,
+                    y_grid_2=comp_data['result2'].y_grid,
+                    title_1=comp_data['title1'],
+                    title_2=comp_data['title2'],
+                    sources=comp_data['sources_for_plot'],
+                )
+                st.image(img_comp, use_container_width=True)
+
+                col_cstat1, col_cstat2 = st.columns(2)
+                with col_cstat1:
+                    r1 = comp_data['result1']
+                    st.markdown(f"**{comp_data['title1']}**")
+                    st.metric("最大浓度", f"{r1.max_concentration:.2f} μg/m³")
+                    st.metric("位置", f"({r1.max_location[0]:.1f}, {r1.max_location[1]:.1f}) km")
+                    st.metric("平均浓度", f"{np.mean(r1.concentration_field):.2f} μg/m³")
+                with col_cstat2:
+                    r2 = comp_data['result2']
+                    st.markdown(f"**{comp_data['title2']}**")
+                    st.metric("最大浓度", f"{r2.max_concentration:.2f} μg/m³")
+                    st.metric("位置", f"({r2.max_location[0]:.1f}, {r2.max_location[1]:.1f}) km")
+                    st.metric("平均浓度", f"{np.mean(r2.concentration_field):.2f} μg/m³")
+
+                if st.button("🗑️ 清除对比结果"):
+                    st.session_state.dispersion_comparison_result = None
+                    st.rerun()
+
+    with tab6:
         st.markdown('<p class="section-header">数据导出</p>', unsafe_allow_html=True)
         st.info("将排放清单和情景模拟结果导出为CSV格式。")
 
