@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import os
 import sys
+import time
 from io import BytesIO
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -112,6 +113,24 @@ if 'dispersion_comparison_result' not in st.session_state:
     st.session_state.dispersion_comparison_result = None
 if 'dispersion_sources_config' not in st.session_state:
     st.session_state.dispersion_sources_config = None
+if 'wind_sequence' not in st.session_state:
+    st.session_state.wind_sequence = None
+if 'animation_results' not in st.session_state:
+    st.session_state.animation_results = None
+if 'animation_playing' not in st.session_state:
+    st.session_state.animation_playing = False
+if 'animation_current_hour' not in st.session_state:
+    st.session_state.animation_current_hour = 0
+if 'source_weights' not in st.session_state:
+    st.session_state.source_weights = None
+if 'weighted_result' not in st.session_state:
+    st.session_state.weighted_result = None
+if 'original_contribution_pcts' not in st.session_state:
+    st.session_state.original_contribution_pcts = None
+if 'receptor_points' not in st.session_state:
+    st.session_state.receptor_points = []
+if 'receptor_concentrations' not in st.session_state:
+    st.session_state.receptor_concentrations = None
 
 
 st.sidebar.title("🌫️ 工业废气排放源解析系统")
@@ -3377,6 +3396,493 @@ elif page == "排放清单编制与情景模拟":
                 if st.button("🗑️ 清除对比结果"):
                     st.session_state.dispersion_comparison_result = None
                     st.rerun()
+
+        st.markdown("---")
+        st.markdown("### 🎬 时序演变动画")
+        st.info("设定24小时风向-风速变化序列，逐帧播放浓度场演变动画。")
+
+        default_wind_sequence = []
+        for h in range(24):
+            if 0 <= h <= 6:
+                ws = 1.0 + h * 0.15
+                wd = 350.0 + h * 3
+            elif 7 <= h <= 9:
+                ws = 2.0 + (h - 7) * 1.0
+                wd = 350.0 + (h - 6) * 25
+            elif 10 <= h <= 14:
+                ws = 5.0 + (h - 10) * 0.2
+                wd = 225.0 + (h - 10) * 3
+            elif 15 <= h <= 18:
+                ws = 5.0 - (h - 14) * 0.5
+                wd = 240.0 - (h - 14) * 5
+            else:
+                ws = 3.0 - (h - 18) * 0.5
+                wd = 220.0 + (h - 18) * 15
+            default_wind_sequence.append({
+                'hour': h, 'wind_speed': round(ws, 1), 'wind_direction': round(wd % 360, 0)
+            })
+
+        if st.session_state.wind_sequence is None:
+            st.session_state.wind_sequence = default_wind_sequence
+
+        with st.expander("📋 编辑24小时风参数序列", expanded=False):
+            wind_df = pd.DataFrame(st.session_state.wind_sequence)
+            edited_wind_df = st.data_editor(
+                wind_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    'hour': st.column_config.NumberColumn("时刻(时)", min_value=0, max_value=23, step=1, disabled=True),
+                    'wind_speed': st.column_config.NumberColumn("风速(m/s)", min_value=0.1, max_value=20.0, step=0.1),
+                    'wind_direction': st.column_config.NumberColumn("风向(°)", min_value=0, max_value=360, step=5),
+                }
+            )
+            if st.button("💾 保存风参数序列"):
+                updated_sequence = []
+                for i, row in edited_wind_df.iterrows():
+                    updated_sequence.append({
+                        'hour': int(row['hour']),
+                        'wind_speed': float(row['wind_speed']),
+                        'wind_direction': float(row['wind_direction']),
+                    })
+                st.session_state.wind_sequence = updated_sequence
+                st.success("✅ 风参数序列已保存")
+
+        col_anim_left, col_anim_right = st.columns([1, 3])
+
+        with col_anim_left:
+            st.markdown("**动画控制**")
+
+            anim_stability = st.selectbox(
+                "动画稳定度",
+                ['A', 'B', 'C', 'D', 'E', 'F'],
+                index=3,
+                key="anim_stability"
+            )
+
+            if st.button("🎬 预计算24小时浓度场", type="primary", use_container_width=True):
+                with st.spinner("正在计算24小时浓度场，请稍候..."):
+                    sources = []
+                    for cfg in st.session_state.dispersion_sources_config:
+                        sources.append(EmissionSource(
+                            name=cfg['name'],
+                            source_strength=cfg['source_strength'],
+                            effective_height=cfg['effective_height'],
+                            x=cfg['x'],
+                            y=cfg['y'],
+                        ))
+
+                    animation_results = {}
+                    for ws_row in st.session_state.wind_sequence:
+                        hour = int(ws_row['hour'])
+                        model = GaussianPlumeModel(
+                            wind_speed=ws_row['wind_speed'],
+                            wind_direction=ws_row['wind_direction'],
+                            stability_class=anim_stability,
+                            mixing_height=mixing_height,
+                            temperature=temperature,
+                            background_concentration=background_conc,
+                        )
+                        model.set_sources(sources)
+                        result = model.simulate()
+                        animation_results[hour] = {
+                            'result': result,
+                            'wind_speed': ws_row['wind_speed'],
+                            'wind_direction': ws_row['wind_direction'],
+                        }
+                    st.session_state.animation_results = animation_results
+                    st.session_state.animation_current_hour = 0
+                    st.success("✅ 24小时浓度场预计算完成")
+
+            if st.session_state.animation_results is not None:
+                col_play1, col_play2, col_play3 = st.columns(3)
+                with col_play1:
+                    if st.button("▶️ 播放动画", use_container_width=True):
+                        st.session_state.animation_playing = True
+                        st.session_state.animation_current_hour = 0
+                    if st.button("⏸️ 暂停", use_container_width=True):
+                        st.session_state.animation_playing = False
+                with col_play2:
+                    if st.button("⏯️ 继续", use_container_width=True):
+                        st.session_state.animation_playing = True
+                with col_play3:
+                    anim_speed = st.selectbox("帧间隔", [200, 500, 1000], index=1, format_func=lambda x: f"{x}ms")
+
+                anim_hour = st.slider(
+                    "时间轴",
+                    min_value=0,
+                    max_value=23,
+                    value=st.session_state.animation_current_hour,
+                    step=1,
+                    key="anim_timeline",
+                )
+                st.session_state.animation_current_hour = anim_hour
+
+        with col_anim_right:
+            if st.session_state.animation_results is not None:
+                if st.session_state.animation_playing:
+                    anim_speed_ms = 500
+                    heatmap_placeholder = st.empty()
+                    info_placeholder = st.empty()
+                    chart_placeholder = st.empty()
+
+                    for h in range(st.session_state.animation_current_hour, 24):
+                        if not st.session_state.animation_playing:
+                            break
+                        h_data = st.session_state.animation_results.get(h)
+                        if h_data is None:
+                            continue
+
+                        h_result = h_data['result']
+                        h_ws = h_data['wind_speed']
+                        h_wd = h_data['wind_direction']
+
+                        info_placeholder.markdown(
+                            f"**当前时刻: {h}:00** | 风速: {h_ws:.1f} m/s | 风向: {h_wd:.0f}°"
+                        )
+
+                        sources_for_anim = [
+                            {'name': cfg['name'], 'x': cfg['x'], 'y': cfg['y']}
+                            for cfg in st.session_state.dispersion_sources_config
+                        ]
+                        img_frame = viz.concentration_heatmap(
+                            concentration_field=h_result.concentration_field,
+                            x_grid=h_result.x_grid,
+                            y_grid=h_result.y_grid,
+                            sources=sources_for_anim,
+                            wind_direction=h_wd,
+                            title=f"PM2.5浓度分布 - {h}:00 (风速{h_ws:.1f}m/s 风向{h_wd:.0f}°)",
+                        )
+                        heatmap_placeholder.image(img_frame, use_container_width=True)
+
+                        max_concs_anim = []
+                        for hh in range(24):
+                            hh_data = st.session_state.animation_results.get(hh)
+                            if hh_data is not None:
+                                max_concs_anim.append(hh_data['result'].max_concentration)
+                            else:
+                                max_concs_anim.append(0.0)
+                        img_anim_ts = viz.time_series_max_conc_chart(
+                            hours=list(range(24)),
+                            max_concentrations=max_concs_anim,
+                            current_hour=h,
+                        )
+                        chart_placeholder.image(img_anim_ts, use_container_width=True)
+
+                        st.session_state.animation_current_hour = h
+                        time.sleep(anim_speed_ms / 1000.0)
+
+                    st.session_state.animation_playing = False
+                else:
+                    current_h = st.session_state.animation_current_hour
+                    anim_data = st.session_state.animation_results.get(current_h)
+                    if anim_data is not None:
+                        anim_result = anim_data['result']
+                        anim_ws = anim_data['wind_speed']
+                        anim_wd = anim_data['wind_direction']
+
+                        st.markdown(f"**当前时刻: {current_h}:00** | 风速: {anim_ws:.1f} m/s | 风向: {anim_wd:.0f}°")
+
+                        sources_for_plot = [
+                            {'name': cfg['name'], 'x': cfg['x'], 'y': cfg['y']}
+                            for cfg in st.session_state.dispersion_sources_config
+                        ]
+                        img_anim = viz.concentration_heatmap(
+                            concentration_field=anim_result.concentration_field,
+                            x_grid=anim_result.x_grid,
+                            y_grid=anim_result.y_grid,
+                            sources=sources_for_plot,
+                            wind_direction=anim_wd,
+                            title=f"PM2.5浓度分布 - {current_h}:00 (风速{anim_ws:.1f}m/s 风向{anim_wd:.0f}°)",
+                        )
+                        st.image(img_anim, use_container_width=True)
+
+                        st.markdown("---")
+                        max_concs = []
+                        for h in range(24):
+                            h_data = st.session_state.animation_results.get(h)
+                            if h_data is not None:
+                                max_concs.append(h_data['result'].max_concentration)
+                            else:
+                                max_concs.append(0.0)
+
+                        img_ts = viz.time_series_max_conc_chart(
+                            hours=list(range(24)),
+                            max_concentrations=max_concs,
+                            current_hour=current_h,
+                        )
+                        st.image(img_ts, use_container_width=True)
+                    else:
+                        st.info("请选择有效时刻")
+            else:
+                st.info("请先点击'预计算24小时浓度场'按钮")
+
+        st.markdown("---")
+        st.markdown("### ⚖️ 多源叠加权重分析")
+        st.info("调整各排放源权重系数(0-200%)，模拟不同减排情景下的浓度场变化。")
+
+        source_names_disp = [s['name'] for s in st.session_state.dispersion_sources_config]
+
+        if st.session_state.source_weights is None:
+            st.session_state.source_weights = {name: 1.0 for name in source_names_disp}
+
+        col_weight_left, col_weight_right = st.columns([1, 2])
+
+        with col_weight_left:
+            st.markdown("**权重调节面板**")
+            new_weights = {}
+            for sname in source_names_disp:
+                default_w = st.session_state.source_weights.get(sname, 1.0)
+                w_val = st.slider(
+                    f"{sname}",
+                    min_value=0,
+                    max_value=200,
+                    value=int(default_w * 100),
+                    step=5,
+                    key=f"weight_{sname}",
+                    help=f"调整{sname}的权重系数，0%=关停，100%=原始，200%=加倍",
+                )
+                new_weights[sname] = w_val / 100.0
+
+            st.session_state.source_weights = new_weights
+
+            if st.button("🔄 重新计算（权重）", type="primary", use_container_width=True):
+                with st.spinner("正在计算加权浓度场..."):
+                    sources = []
+                    for cfg in st.session_state.dispersion_sources_config:
+                        sources.append(EmissionSource(
+                            name=cfg['name'],
+                            source_strength=cfg['source_strength'],
+                            effective_height=cfg['effective_height'],
+                            x=cfg['x'],
+                            y=cfg['y'],
+                        ))
+
+                    base_model = GaussianPlumeModel(
+                        wind_speed=wind_speed,
+                        wind_direction=wind_direction,
+                        stability_class=stability_class,
+                        mixing_height=mixing_height,
+                        temperature=temperature,
+                        background_concentration=background_conc,
+                    )
+                    base_model.set_sources(sources)
+                    base_result = base_model.simulate()
+                    base_avg = np.mean(base_result.concentration_field, axis=None)
+                    original_pcts = {}
+                    for sname, sfield in base_result.source_contributions.items():
+                        original_pcts[sname] = np.mean(sfield) / base_avg * 100 if base_avg > 0 else 0
+
+                    weighted_model = GaussianPlumeModel(
+                        wind_speed=wind_speed,
+                        wind_direction=wind_direction,
+                        stability_class=stability_class,
+                        mixing_height=mixing_height,
+                        temperature=temperature,
+                        background_concentration=background_conc,
+                    )
+                    weighted_model.set_sources(sources)
+                    weighted_result = weighted_model.simulate_with_weights(new_weights)
+                    weighted_avg = np.mean(weighted_result.concentration_field, axis=None)
+                    weighted_pcts = {}
+                    for sname, sfield in weighted_result.source_contributions.items():
+                        weighted_pcts[sname] = np.mean(sfield) / weighted_avg * 100 if weighted_avg > 0 else 0
+
+                    st.session_state.weighted_result = {
+                        'result': weighted_result,
+                        'original_pcts': original_pcts,
+                        'weighted_pcts': weighted_pcts,
+                    }
+                    st.session_state.original_contribution_pcts = original_pcts
+                    st.success("✅ 加权计算完成")
+
+        with col_weight_right:
+            if st.session_state.weighted_result is not None:
+                w_data = st.session_state.weighted_result
+                w_result = w_data['result']
+
+                shutdown_list = [
+                    name for name, w in st.session_state.source_weights.items()
+                    if w <= 0
+                ]
+
+                sources_for_plot = [
+                    {'name': cfg['name'], 'x': cfg['x'], 'y': cfg['y']}
+                    for cfg in st.session_state.dispersion_sources_config
+                ]
+
+                img_weighted = viz.concentration_heatmap_with_receptors(
+                    concentration_field=w_result.concentration_field,
+                    x_grid=w_result.x_grid,
+                    y_grid=w_result.y_grid,
+                    sources=sources_for_plot,
+                    shutdown_sources=shutdown_list,
+                    wind_direction=wind_direction,
+                    title="加权后PM2.5浓度空间分布",
+                )
+                st.image(img_weighted, use_container_width=True)
+
+                col_wstat1, col_wstat2, col_wstat3 = st.columns(3)
+                with col_wstat1:
+                    st.metric("加权最大浓度", f"{w_result.max_concentration:.2f} μg/m³")
+                with col_wstat2:
+                    st.metric("加权平均浓度", f"{np.mean(w_result.concentration_field):.2f} μg/m³")
+                with col_wstat3:
+                    active_count = len(source_names_disp) - len(shutdown_list)
+                    st.metric("活跃源数", f"{active_count}/{len(source_names_disp)}")
+
+                st.markdown("---")
+                st.markdown("**加权前后贡献变化**")
+                orig_pcts_list = [w_data['original_pcts'].get(n, 0) for n in source_names_disp]
+                weighted_pcts_list = [w_data['weighted_pcts'].get(n, 0) for n in source_names_disp]
+                img_change = viz.weighted_contribution_change_bar(
+                    source_names=source_names_disp,
+                    original_pcts=orig_pcts_list,
+                    weighted_pcts=weighted_pcts_list,
+                )
+                st.image(img_change, use_container_width=True)
+
+                change_data = []
+                for sname in source_names_disp:
+                    orig = w_data['original_pcts'].get(sname, 0)
+                    weighted = w_data['weighted_pcts'].get(sname, 0)
+                    change = weighted - orig
+                    change_data.append({
+                        '排放源': sname,
+                        '原始贡献(%)': round(orig, 2),
+                        '加权贡献(%)': round(weighted, 2),
+                        '变化幅度(%)': round(change, 2),
+                    })
+                st.dataframe(pd.DataFrame(change_data), use_container_width=True)
+            else:
+                st.info("请点击左侧'重新计算'按钮查看加权结果")
+
+        st.markdown("---")
+        st.markdown("### 📍 受体监测点浓度分析")
+        st.info("设置1~5个受体点坐标，计算各源对每个受体点的浓度贡献。")
+
+        col_rp_left, col_rp_right = st.columns([1, 2])
+
+        with col_rp_left:
+            st.markdown("**受体点设置**")
+
+            n_receptors = st.number_input(
+                "受体点数量",
+                min_value=1,
+                max_value=5,
+                value=max(1, len(st.session_state.receptor_points)),
+                step=1,
+                key="n_receptors",
+            )
+
+            current_receptors = []
+            for i in range(n_receptors):
+                existing = st.session_state.receptor_points[i] if i < len(st.session_state.receptor_points) else None
+                default_x = existing['x'] if existing else 0.0
+                default_y = existing['y'] if existing else 0.0
+                rp_name = existing.get('name', f'R{i+1}') if existing else f'R{i+1}'
+
+                st.markdown(f"**受体{i+1}**")
+                rp_name_input = st.text_input(f"名称", value=rp_name, key=f"rp_name_{i}")
+                col_rx, col_ry = st.columns(2)
+                with col_rx:
+                    rp_x = st.number_input(f"X(km)", value=default_x, step=0.1, key=f"rp_x_{i}")
+                with col_ry:
+                    rp_y = st.number_input(f"Y(km)", value=default_y, step=0.1, key=f"rp_y_{i}")
+                current_receptors.append({'name': rp_name_input, 'x': rp_x, 'y': rp_y})
+
+            st.session_state.receptor_points = current_receptors
+
+            rp_weights = st.session_state.source_weights or {name: 1.0 for name in source_names_disp}
+
+            if st.button("📊 计算受体点浓度", type="primary", use_container_width=True):
+                with st.spinner("正在计算受体点浓度贡献..."):
+                    sources = []
+                    for cfg in st.session_state.dispersion_sources_config:
+                        sources.append(EmissionSource(
+                            name=cfg['name'],
+                            source_strength=cfg['source_strength'],
+                            effective_height=cfg['effective_height'],
+                            x=cfg['x'],
+                            y=cfg['y'],
+                        ))
+
+                    model = GaussianPlumeModel(
+                        wind_speed=wind_speed,
+                        wind_direction=wind_direction,
+                        stability_class=stability_class,
+                        mixing_height=mixing_height,
+                        temperature=temperature,
+                        background_concentration=background_conc,
+                    )
+                    model.set_sources(sources)
+                    receptor_concs = model.compute_receptor_concentrations(
+                        current_receptors,
+                        weights=rp_weights,
+                    )
+                    st.session_state.receptor_concentrations = receptor_concs
+                    st.success("✅ 受体点浓度计算完成")
+
+        with col_rp_right:
+            if st.session_state.receptor_concentrations is not None:
+                rp_concs = st.session_state.receptor_concentrations
+                rp_source_names = [s['name'] for s in st.session_state.dispersion_sources_config]
+
+                st.markdown("**受体点浓度贡献表**")
+                table_data = []
+                for rp_name, concs in rp_concs.items():
+                    row = {'受体点': rp_name}
+                    for sname in rp_source_names:
+                        row[sname] = round(concs.get(sname, 0), 4)
+                    row['总浓度'] = round(concs.get('总浓度', 0), 4)
+                    table_data.append(row)
+                st.dataframe(pd.DataFrame(table_data), use_container_width=True)
+
+                st.markdown("---")
+                st.markdown("**各受体点源贡献雷达图**")
+                radar_data = {}
+                for rp_name, concs in rp_concs.items():
+                    source_vals = [concs.get(sname, 0) for sname in rp_source_names]
+                    total_source = sum(source_vals)
+                    if total_source > 0:
+                        pct_vals = [v / total_source * 100 for v in source_vals]
+                    else:
+                        pct_vals = [0] * len(rp_source_names)
+                    radar_data[rp_name] = pct_vals
+
+                if len(rp_source_names) >= 3:
+                    img_radar = viz.radar_chart(
+                        categories=rp_source_names,
+                        values_dict=radar_data,
+                        title="各受体点源贡献构成比例(%)",
+                    )
+                    st.image(img_radar, use_container_width=True)
+                else:
+                    st.info("排放源数量不足3个，无法绘制雷达图")
+
+                st.markdown("---")
+                st.markdown("**受体点在浓度场上的位置**")
+                if st.session_state.dispersion_result is not None:
+                    disp_data = st.session_state.dispersion_result
+                    result = disp_data['result']
+                    sources_for_plot = [
+                        {'name': cfg['name'], 'x': cfg['x'], 'y': cfg['y']}
+                        for cfg in st.session_state.dispersion_sources_config
+                    ]
+                    img_rp = viz.concentration_heatmap_with_receptors(
+                        concentration_field=result.concentration_field,
+                        x_grid=result.x_grid,
+                        y_grid=result.y_grid,
+                        sources=sources_for_plot,
+                        receptor_points=current_receptors,
+                        wind_direction=wind_direction,
+                        title="浓度场与受体点位置",
+                    )
+                    st.image(img_rp, use_container_width=True)
+                else:
+                    st.info("请先运行基础模拟以显示浓度场")
+            else:
+                st.info("请点击左侧'计算受体点浓度'按钮")
 
     with tab6:
         st.markdown('<p class="section-header">数据导出</p>', unsafe_allow_html=True)

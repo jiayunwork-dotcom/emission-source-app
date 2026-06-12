@@ -239,6 +239,148 @@ class GaussianPlumeModel:
             parameters=parameters,
         )
 
+    def simulate_with_weights(
+        self,
+        weights: Dict[str, float],
+        selected_source: Optional[str] = None,
+    ) -> DispersionResult:
+        n_points = int(self.domain_size / self.grid_resolution) + 1
+        x_coords = np.linspace(-self.domain_size / 2, self.domain_size / 2, n_points)
+        y_coords = np.linspace(-self.domain_size / 2, self.domain_size / 2, n_points)
+        x_grid, y_grid = np.meshgrid(x_coords, y_coords)
+
+        total_concentration = np.zeros_like(x_grid)
+        source_contributions: Dict[str, np.ndarray] = {}
+        centerline_concentrations: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+
+        sources_to_process = self.sources
+        if selected_source is not None:
+            sources_to_process = [s for s in self.sources if s.name == selected_source]
+
+        for source in sources_to_process:
+            w = weights.get(source.name, 1.0)
+            adjusted_strength = source.source_strength * w
+            source_field = np.zeros_like(x_grid)
+
+            x_down, y_cross = self._rotate_coordinates(
+                x_grid, y_grid, source.x, source.y
+            )
+
+            for i in range(x_grid.shape[0]):
+                for j in range(x_grid.shape[1]):
+                    x_d = x_down[i, j]
+                    y_c = y_cross[i, j]
+
+                    if x_d <= 0:
+                        continue
+
+                    sigma_y = self._calculate_sigma_y(x_d)
+                    sigma_z = self._calculate_sigma_z(x_d)
+
+                    Q_ug_s = adjusted_strength * 1e6
+                    conc = self._gaussian_concentration(
+                        Q_ug_s, self.wind_speed, sigma_y, sigma_z,
+                        y_c * 1000.0, 0.0, source.effective_height
+                    )
+                    source_field[i, j] = conc
+
+            source_contributions[source.name] = source_field
+            total_concentration += source_field
+
+            cl_distances = np.linspace(0, self.domain_size, 200)
+            cl_concentrations = np.zeros_like(cl_distances)
+            for idx, d in enumerate(cl_distances):
+                if d <= 0:
+                    continue
+                sigma_y = self._calculate_sigma_y(d)
+                sigma_z = self._calculate_sigma_z(d)
+                Q_ug_s = adjusted_strength * 1e6
+                cl_concentrations[idx] = self._gaussian_concentration(
+                    Q_ug_s, self.wind_speed, sigma_y, sigma_z,
+                    0.0, 0.0, source.effective_height
+                )
+            centerline_concentrations[source.name] = (cl_distances, cl_concentrations)
+
+        total_concentration += self.background_concentration
+
+        max_idx = np.unravel_index(np.argmax(total_concentration), total_concentration.shape)
+        max_concentration = total_concentration[max_idx]
+        max_x = x_grid[max_idx]
+        max_y = y_grid[max_idx]
+
+        source_contribution_at_max = {}
+        for name, field in source_contributions.items():
+            source_contribution_at_max[name] = field[max_idx]
+
+        parameters = {
+            'wind_speed': self.wind_speed,
+            'wind_direction': self.wind_direction,
+            'stability_class': self.stability_class,
+            'mixing_height': self.mixing_height,
+            'temperature': self.temperature,
+            'domain_size': self.domain_size,
+            'grid_resolution': self.grid_resolution,
+            'background_concentration': self.background_concentration,
+            'weights': weights,
+        }
+
+        return DispersionResult(
+            concentration_field=total_concentration,
+            x_grid=x_grid,
+            y_grid=y_grid,
+            max_concentration=max_concentration,
+            max_location=(max_x, max_y),
+            source_contributions=source_contributions,
+            source_contribution_at_max=source_contribution_at_max,
+            centerline_concentrations=centerline_concentrations,
+            parameters=parameters,
+        )
+
+    def compute_receptor_concentrations(
+        self,
+        receptor_points: List[Dict],
+        weights: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Dict[str, float]]:
+        if weights is None:
+            weights = {s.name: 1.0 for s in self.sources}
+
+        results = {}
+        for rp in receptor_points:
+            rp_name = rp.get('name', f"({rp['x']:.1f},{rp['y']:.1f})")
+            rx, ry = rp['x'], rp['y']
+            source_contribs = {}
+
+            for source in self.sources:
+                w = weights.get(source.name, 1.0)
+                adjusted_strength = source.source_strength * w
+
+                dx = rx - source.x
+                dy = ry - source.y
+                theta_rad = np.radians(270.0 - self.wind_direction)
+                cos_theta = np.cos(theta_rad)
+                sin_theta = np.sin(theta_rad)
+                x_downwind = dx * cos_theta + dy * sin_theta
+                y_crosswind = -dx * sin_theta + dy * cos_theta
+
+                if x_downwind <= 0:
+                    source_contribs[source.name] = 0.0
+                    continue
+
+                sigma_y = self._calculate_sigma_y(x_downwind)
+                sigma_z = self._calculate_sigma_z(x_downwind)
+                Q_ug_s = adjusted_strength * 1e6
+                conc = self._gaussian_concentration(
+                    Q_ug_s, self.wind_speed, sigma_y, sigma_z,
+                    y_crosswind * 1000.0, 0.0, source.effective_height
+                )
+                source_contribs[source.name] = conc
+
+            total = sum(source_contribs.values()) + self.background_concentration
+            source_contribs['总浓度'] = total
+            results[rp_name] = source_contribs
+
+        return results
+
     def get_influence_radius(
         self,
         source_name: str,

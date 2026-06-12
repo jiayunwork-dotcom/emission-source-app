@@ -1112,6 +1112,265 @@ class Visualizer:
         plt.tight_layout()
         return self._fig_to_bytes(fig)
 
+    def concentration_heatmap_with_receptors(
+        self,
+        concentration_field: np.ndarray,
+        x_grid: np.ndarray,
+        y_grid: np.ndarray,
+        sources: Optional[List[Dict]] = None,
+        receptor_points: Optional[List[Dict]] = None,
+        shutdown_sources: Optional[List[str]] = None,
+        wind_direction: Optional[float] = None,
+        title: str = "PM2.5浓度空间分布",
+        cmap: str = 'YlOrRd',
+        vmin: Optional[float] = None,
+        vmax: Optional[float] = None,
+    ) -> BytesIO:
+        fig, ax = plt.subplots(figsize=(10, 8))
+
+        if vmax is None:
+            vmax = np.percentile(concentration_field, 99)
+        if vmin is None:
+            vmin = concentration_field.min()
+
+        im = ax.contourf(
+            x_grid, y_grid, concentration_field,
+            levels=20,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            extend='both',
+        )
+
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label('PM2.5浓度 (μg/m³)', fontsize=11)
+
+        if sources is not None:
+            markers = ['o', 's', '^', 'D', 'v', 'p', '*', 'h']
+            colors_src = COLORS[:len(sources)]
+            shutdown_set = set(shutdown_sources or [])
+            for i, src in enumerate(sources):
+                marker = markers[i % len(markers)]
+                if src['name'] in shutdown_set:
+                    ax.scatter(
+                        src['x'], src['y'],
+                        marker='o',
+                        s=200,
+                        facecolors='none',
+                        edgecolors='gray',
+                        linewidth=2,
+                        linestyle='dashed',
+                        zorder=10,
+                    )
+                    ax.annotate(
+                        src['name'] + '(已关停)',
+                        (src['x'], src['y']),
+                        xytext=(10, 10),
+                        textcoords='offset points',
+                        fontsize=9,
+                        fontweight='bold',
+                        color='gray',
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.6, edgecolor='gray', linestyle='dashed'),
+                    )
+                    circle = plt.Circle((src['x'], src['y']), 0.3, fill=False,
+                                        edgecolor='gray', linestyle='--', linewidth=1.5)
+                    ax.add_patch(circle)
+                else:
+                    ax.scatter(
+                        src['x'], src['y'],
+                        marker=marker,
+                        s=150,
+                        color=colors_src[i],
+                        edgecolors='black',
+                        linewidth=1.5,
+                        zorder=10,
+                        label=src['name'],
+                    )
+                    ax.annotate(
+                        src['name'],
+                        (src['x'], src['y']),
+                        xytext=(10, 10),
+                        textcoords='offset points',
+                        fontsize=9,
+                        fontweight='bold',
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8),
+                    )
+            active_sources = [s for s in sources if s['name'] not in shutdown_set]
+            if active_sources:
+                ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=9)
+
+        if receptor_points is not None and len(receptor_points) > 0:
+            for i, rp in enumerate(receptor_points):
+                ax.scatter(
+                    rp['x'], rp['y'],
+                    marker='*',
+                    s=300,
+                    color='#FF00FF',
+                    edgecolors='black',
+                    linewidth=1.5,
+                    zorder=15,
+                    label=f"受体{i+1}" if i == 0 else None,
+                )
+                ax.annotate(
+                    rp.get('name', f'R{i+1}'),
+                    (rp['x'], rp['y']),
+                    xytext=(8, -15),
+                    textcoords='offset points',
+                    fontsize=9,
+                    fontweight='bold',
+                    color='#FF00FF',
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8, edgecolor='#FF00FF'),
+                )
+
+        if wind_direction is not None:
+            theta_rad = np.radians(wind_direction)
+            arrow_x = np.cos(theta_rad) * 3
+            arrow_y = np.sin(theta_rad) * 3
+            ax.annotate(
+                '',
+                xy=(arrow_x, arrow_y),
+                xytext=(0, 0),
+                arrowprops=dict(arrowstyle='->', color='blue', lw=2.5),
+            )
+            ax.text(
+                arrow_x * 1.2, arrow_y * 1.2,
+                f'风向 {wind_direction:.0f}°',
+                color='blue',
+                fontsize=10,
+                fontweight='bold',
+                ha='center',
+                va='center',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8),
+            )
+
+        ax.set_xlabel('东西向距离 (km)', fontsize=12)
+        ax.set_ylabel('南北向距离 (km)', fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.set_aspect('equal')
+        ax.grid(True, alpha=0.3, linestyle='--')
+
+        plt.tight_layout()
+        return self._fig_to_bytes(fig)
+
+    def radar_chart(
+        self,
+        categories: List[str],
+        values_dict: Dict[str, List[float]],
+        title: str = "各源贡献构成比例",
+    ) -> BytesIO:
+        n_cats = len(categories)
+        if n_cats < 3:
+            n_cats = 3
+            categories = categories + [''] * (n_cats - len(categories))
+
+        angles = np.linspace(0, 2 * np.pi, n_cats, endpoint=False).tolist()
+        angles += angles[:1]
+
+        n_receptors = len(values_dict)
+        fig, axes = plt.subplots(1, max(n_receptors, 1), figsize=(5 * max(n_receptors, 1), 5),
+                                  subplot_kw=dict(polar=True))
+        if n_receptors == 1:
+            axes = [axes]
+
+        receptor_names = list(values_dict.keys())
+        for idx, (rp_name, values) in enumerate(values_dict.items()):
+            ax = axes[idx]
+            vals = list(values[:n_cats])
+            while len(vals) < n_cats:
+                vals.append(0)
+            vals += vals[:1]
+
+            ax.plot(angles, vals, 'o-', linewidth=2, color=COLORS[idx % len(COLORS)])
+            ax.fill(angles, vals, alpha=0.25, color=COLORS[idx % len(COLORS)])
+            ax.set_xticks(angles[:-1])
+            ax.set_xticklabels(categories, fontsize=8)
+            ax.set_title(rp_name, fontsize=11, fontweight='bold', pad=20)
+            ax.grid(True, alpha=0.3)
+
+        fig.suptitle(title, fontsize=14, fontweight='bold')
+        plt.tight_layout()
+        return self._fig_to_bytes(fig)
+
+    def time_series_max_conc_chart(
+        self,
+        hours: List[int],
+        max_concentrations: List[float],
+        current_hour: int,
+        title: str = "最大地面浓度时序变化",
+    ) -> BytesIO:
+        fig, ax = plt.subplots(figsize=(12, 5))
+
+        played_hours = [h for h in hours if h <= current_hour]
+        played_concs = [max_concentrations[h] for h in played_hours]
+        future_hours = [h for h in hours if h > current_hour]
+        future_concs = [max_concentrations[h] for h in future_hours]
+
+        if len(played_hours) > 1:
+            ax.plot(played_hours, played_concs, '-o', linewidth=2, markersize=5,
+                    label='已播放', color='#1f77b4')
+        elif len(played_hours) == 1:
+            ax.scatter(played_hours, played_concs, s=60, color='#1f77b4', zorder=5)
+
+        if len(future_hours) > 0:
+            all_future_hours = played_hours[-1:] + future_hours if played_hours else future_hours
+            all_future_concs = played_concs[-1:] + future_concs if played_concs else future_concs
+            ax.plot(all_future_hours, all_future_concs, '--o', linewidth=1.5, markersize=4,
+                    label='未播放', color='#aaaaaa', alpha=0.7)
+
+        if current_hour in hours:
+            idx = hours.index(current_hour)
+            ax.scatter([current_hour], [max_concentrations[idx]], s=120, color='red',
+                       zorder=10, edgecolors='black', linewidth=1.5)
+            ax.annotate(f'{max_concentrations[idx]:.1f}',
+                        (current_hour, max_concentrations[idx]),
+                        xytext=(5, 10), textcoords='offset points',
+                        fontsize=10, fontweight='bold', color='red')
+
+        ax.set_xlabel('时刻 (时)', fontsize=12)
+        ax.set_ylabel('最大地面浓度 (μg/m³)', fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.set_xticks(hours)
+        ax.set_xticklabels([f'{h}:00' for h in hours], fontsize=8, rotation=45)
+        ax.legend(fontsize=10)
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        return self._fig_to_bytes(fig)
+
+    def weighted_contribution_change_bar(
+        self,
+        source_names: List[str],
+        original_pcts: List[float],
+        weighted_pcts: List[float],
+        title: str = "加权后各源贡献百分比变化",
+    ) -> BytesIO:
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        x = np.arange(len(source_names))
+        width = 0.35
+
+        bars1 = ax.bar(x - width/2, original_pcts, width, label='原始(100%)', color='#1f77b4', alpha=0.85)
+        bars2 = ax.bar(x + width/2, weighted_pcts, width, label='加权后', color='#ff7f0e', alpha=0.85)
+
+        for i, (orig, weighted) in enumerate(zip(original_pcts, weighted_pcts)):
+            change = weighted - orig
+            if abs(change) > 0.01:
+                color = '#d62728' if change > 0 else '#2ca02c'
+                sign = '+' if change > 0 else ''
+                ax.text(i + width/2, weighted + 0.3, f'{sign}{change:.1f}%',
+                        ha='center', va='bottom', fontsize=9, fontweight='bold', color=color)
+
+        ax.set_xlabel('排放源', fontsize=12)
+        ax.set_ylabel('区域平均浓度贡献 (%)', fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels(source_names, rotation=30, ha='right')
+        ax.legend(fontsize=10)
+        ax.grid(True, alpha=0.3, axis='y')
+
+        plt.tight_layout()
+        return self._fig_to_bytes(fig)
+
     def source_contribution_bar(
         self,
         source_names: List[str],
