@@ -101,6 +101,8 @@ if 'scenario_engine' not in st.session_state:
     st.session_state.scenario_engine = ScenarioSimulationEngine(st.session_state.emission_inventory)
 if 'emission_inventory_warning_shown' not in st.session_state:
     st.session_state.emission_inventory_warning_shown = False
+if 'source_to_industry_mapping' not in st.session_state:
+    st.session_state.source_to_industry_mapping = {}
 
 
 st.sidebar.title("🌫️ 工业废气排放源解析系统")
@@ -2092,6 +2094,9 @@ elif page == "排放清单编制与情景模拟":
         st.session_state.emission_inventory_warning_shown = True
 
     source_contribs = {}
+    raw_source_contribs = {}
+    inventory_industries = inventory.factor_library.get_all_industries()
+    
     if st.session_state.last_result is not None:
         result_info = st.session_state.last_result
         result = result_info['result']
@@ -2100,9 +2105,10 @@ elif page == "排放清单编制与情景模拟":
             source_names = contrib_dict['source']
             contributions = contrib_dict['contribution']
             
-            industry_mapping = {}
-            inventory_industries = inventory.factor_library.get_all_industries()
+            for i, src_name in enumerate(source_names):
+                raw_source_contribs[src_name] = contributions[i]
             
+            auto_mapping = {}
             for src_name in source_names:
                 src_name_lower = src_name.lower()
                 matched = None
@@ -2111,7 +2117,7 @@ elif page == "排放清单编制与情景模拟":
                     if '煤' in src_name_lower and '煤' in ind_name_lower:
                         matched = ind_name
                         break
-                    elif '机动车' in src_name_lower or '车' in src_name_lower and '车' in ind_name_lower:
+                    elif ('机动车' in src_name_lower or '车' in src_name_lower) and '车' in ind_name_lower:
                         matched = ind_name
                         break
                     elif '扬尘' in src_name_lower and '扬尘' in ind_name_lower:
@@ -2120,7 +2126,7 @@ elif page == "排放清单编制与情景模拟":
                     elif '生物质' in src_name_lower and '生物质' in ind_name_lower:
                         matched = ind_name
                         break
-                    elif '餐饮' in src_name_lower or '油烟' in src_name_lower and ('餐饮' in ind_name_lower or '油烟' in ind_name_lower):
+                    elif ('餐饮' in src_name_lower or '油烟' in src_name_lower) and ('餐饮' in ind_name_lower or '油烟' in ind_name_lower):
                         matched = ind_name
                         break
                     elif '工业' in src_name_lower and '煤' in ind_name_lower:
@@ -2134,14 +2140,22 @@ elif page == "排放清单编制与情景模拟":
                         break
                 
                 if matched:
-                    industry_mapping[src_name] = matched
+                    auto_mapping[src_name] = matched
             
+            saved_mapping = st.session_state.source_to_industry_mapping
             for i, src_name in enumerate(source_names):
-                if src_name in industry_mapping:
-                    ind_name = industry_mapping[src_name]
+                if src_name in saved_mapping and saved_mapping[src_name] in inventory_industries:
+                    ind_name = saved_mapping[src_name]
                     source_contribs[ind_name] = contributions[i]
+                elif src_name in auto_mapping:
+                    ind_name = auto_mapping[src_name]
+                    source_contribs[ind_name] = contributions[i]
+                    if src_name not in saved_mapping:
+                        saved_mapping[src_name] = ind_name
                 else:
                     source_contribs[src_name] = contributions[i]
+            
+            st.session_state.source_to_industry_mapping = saved_mapping
         
         inventory.set_source_contributions(source_contribs)
 
@@ -2618,7 +2632,76 @@ elif page == "排放清单编制与情景模拟":
         if st.session_state.last_result is None:
             st.warning("⚠️ 尚未完成源解析分析，无法进行自上而下的校验。请先在'源解析分析'页面运行解析算法。")
         else:
-            st.success(f"✅ 已获取源解析结果，共识别 {len(source_contribs)} 个源类")
+            st.success(f"✅ 已获取源解析结果，共识别 {len(raw_source_contribs)} 个源类")
+
+            st.markdown("**🔗 源类-行业映射配置**")
+            st.info("请将源解析得到的源类映射到排放清单的对应行业。如果源名称中已有语义化关键词（如'燃煤'、'机动车'等），系统会自动匹配。")
+            
+            saved_mapping = st.session_state.source_to_industry_mapping
+            unmapped_sources = []
+            
+            for src_name in raw_source_contribs.keys():
+                is_mapped = (src_name in saved_mapping and saved_mapping[src_name] in inventory_industries)
+                if not is_mapped:
+                    unmapped_sources.append(src_name)
+            
+            if len(unmapped_sources) > 0:
+                st.warning(f"⚠️ 检测到 {len(unmapped_sources)} 个源类未映射到行业，请手动配置：")
+            
+            mapping_changed = False
+            col_map1, col_map2 = st.columns([1, 1])
+            sources_list = list(raw_source_contribs.keys())
+            
+            for idx, src_name in enumerate(sources_list):
+                with col_map1 if idx % 2 == 0 else col_map2:
+                    current_mapping = saved_mapping.get(src_name, "")
+                    contrib_val = raw_source_contribs[src_name]
+                    
+                    options = [""] + inventory_industries
+                    if current_mapping in inventory_industries:
+                        default_idx = inventory_industries.index(current_mapping) + 1
+                    else:
+                        default_idx = 0
+                    
+                    label = f"{src_name} (贡献: {contrib_val:.2f} μg/m³)"
+                    selected = st.selectbox(
+                        label,
+                        options=options,
+                        index=default_idx,
+                        key=f"map_{src_name}"
+                    )
+                    
+                    if selected != current_mapping:
+                        if selected == "":
+                            if src_name in saved_mapping:
+                                del saved_mapping[src_name]
+                                mapping_changed = True
+                        else:
+                            saved_mapping[src_name] = selected
+                            mapping_changed = True
+            
+            if mapping_changed:
+                st.session_state.source_to_industry_mapping = saved_mapping
+                st.rerun()
+            
+            st.markdown("---")
+            
+            mapped_count = sum(1 for s in raw_source_contribs if s in saved_mapping and saved_mapping[s] in inventory_industries)
+            if mapped_count == len(raw_source_contribs):
+                st.success(f"✅ 所有 {len(raw_source_contribs)} 个源类已完成映射")
+            else:
+                st.warning(f"⚠️ 已映射 {mapped_count}/{len(raw_source_contribs)} 个源类，未映射的源类将使用原始名称但无法参与行业校验")
+            
+            with st.expander("查看当前映射结果"):
+                mapping_display = []
+                for src_name in sorted(raw_source_contribs.keys()):
+                    mapped_to = saved_mapping.get(src_name, "❌ 未映射")
+                    mapping_display.append({
+                        "源解析源类": src_name,
+                        "贡献浓度 (μg/m³)": round(raw_source_contribs[src_name], 4),
+                        "映射到行业": mapped_to
+                    })
+                st.dataframe(pd.DataFrame(mapping_display), use_container_width=True)
 
             contrib_df = pd.DataFrame([
                 {'源类': k, '平均贡献浓度 (μg/m³)': round(v, 4)}
@@ -2646,13 +2729,22 @@ elif page == "排放清单编制与情景模拟":
                         else:
                             return 'background-color: #ccffcc; color: #2ca02c'
 
-                    styled_df = validation_df.style.applymap(
-                        color_status, subset=['状态']
-                    ).format({
-                        '自下而上(吨/年)': '{:.4f}',
-                        '自上而下(吨/年)': '{:.4f}',
-                        '偏差率(%)': '{:.2f}'
-                    })
+                    try:
+                        styled_df = validation_df.style.map(
+                            color_status, subset=['状态']
+                        ).format({
+                            '自下而上(吨/年)': '{:.4f}',
+                            '自上而下(吨/年)': '{:.4f}',
+                            '偏差率(%)': '{:.2f}'
+                        })
+                    except AttributeError:
+                        styled_df = validation_df.style.applymap(
+                            color_status, subset=['状态']
+                        ).format({
+                            '自下而上(吨/年)': '{:.4f}',
+                            '自上而下(吨/年)': '{:.4f}',
+                            '偏差率(%)': '{:.2f}'
+                        })
                     st.dataframe(styled_df, use_container_width=True)
 
                     st.markdown("**校验规则说明:**")
