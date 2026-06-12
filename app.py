@@ -91,6 +91,8 @@ if 'alert_config' not in st.session_state:
     }
 if 'sensitivity_result' not in st.session_state:
     st.session_state.sensitivity_result = None
+if 'sensitivity_analysis_result' not in st.session_state:
+    st.session_state.sensitivity_analysis_result = None
 if 'cross_validation_results' not in st.session_state:
     st.session_state.cross_validation_results = None
 if 'anomaly_traceability' not in st.session_state:
@@ -2172,10 +2174,11 @@ elif page == "排放清单编制与情景模拟":
 
     st.info(f"📊 当前实测PM2.5平均浓度: **{current_pm25:.2f} μg/m³**")
 
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📝 排放清单编制",
         "🌱 减排情景模拟",
         "⚖️ 清单校验与平衡",
+        "📊 敏感性分析",
         "📤 数据导出"
     ])
 
@@ -2791,6 +2794,217 @@ elif page == "排放清单编制与情景模拟":
                     st.success("✅ 所有行业偏差率均在合理范围内，清单质量良好！")
 
     with tab4:
+        st.markdown('<p class="section-header">敏感性分析</p>', unsafe_allow_html=True)
+        st.info("评估行业活动水平参数或控制效率参数变化对PM2.5浓度预测值的影响程度。支持多参数对比和龙卷风图展示。")
+
+        inventory.calculate_all_emissions()
+
+        col_sens_cfg1, col_sens_cfg2 = st.columns([2, 1])
+
+        with col_sens_cfg1:
+            st.markdown("**📋 参数选择（最多同时对比5条曲线）**")
+
+            industries = inventory.factor_library.get_all_industries()
+            param_options = []
+            for ind in industries:
+                param_options.append({
+                    'key': f"{ind}-activity_level",
+                    'industry': ind,
+                    'param_type': 'activity_level',
+                    'label': f"{ind}-活动水平",
+                })
+                param_options.append({
+                    'key': f"{ind}-control_efficiency",
+                    'industry': ind,
+                    'param_type': 'control_efficiency',
+                    'label': f"{ind}-控制效率",
+                })
+
+            available_labels = [p['label'] for p in param_options]
+            default_selected = available_labels[:2] if len(available_labels) >= 2 else available_labels
+
+            selected_param_labels = st.multiselect(
+                "选择要分析的行业-参数组合",
+                available_labels,
+                default=default_selected,
+                max_selections=5,
+                help="最多同时选择5个参数进行对比分析",
+            )
+
+            analysis_configs = []
+            for label in selected_param_labels:
+                for opt in param_options:
+                    if opt['label'] == label:
+                        analysis_configs.append({
+                            'industry_name': opt['industry'],
+                            'param_type': opt['param_type'],
+                            'label': opt['label'],
+                        })
+                        break
+
+        with col_sens_cfg2:
+            st.markdown("**⚙️ 扰动设置**")
+            perturbation_min = st.slider(
+                "最小扰动比例 (%)",
+                min_value=-90.0,
+                max_value=0.0,
+                value=-50.0,
+                step=5.0,
+            )
+            perturbation_max = st.slider(
+                "最大扰动比例 (%)",
+                min_value=0.0,
+                max_value=90.0,
+                value=50.0,
+                step=5.0,
+            )
+            perturbation_step = st.slider(
+                "扰动步长 (%)",
+                min_value=1.0,
+                max_value=30.0,
+                value=10.0,
+                step=1.0,
+            )
+
+            n_points = int((perturbation_max - perturbation_min) / perturbation_step) + 1
+            st.caption(f"将生成 {n_points} 个扰动点 (从 {perturbation_min:.0f}% 到 {perturbation_max:.0f}%)")
+
+        if len(analysis_configs) == 0:
+            st.warning("⚠️ 请至少选择一个参数进行分析")
+        else:
+            if st.button("🔬 运行敏感性分析", type="primary"):
+                with st.spinner("正在执行敏感性分析计算，请稍候..."):
+                    sensitivity_result = scenario_engine.run_sensitivity_analysis(
+                        analysis_configs=analysis_configs,
+                        perturbation_min=perturbation_min,
+                        perturbation_max=perturbation_max,
+                        perturbation_step=perturbation_step,
+                    )
+                    st.session_state.sensitivity_analysis_result = sensitivity_result
+                    st.success("✅ 敏感性分析完成！")
+
+        if 'sensitivity_analysis_result' in st.session_state and st.session_state.sensitivity_analysis_result is not None:
+            sens_result = st.session_state.sensitivity_analysis_result
+            perturbation_points = sens_result['perturbation_points']
+            baseline_pm25 = sens_result['baseline_pm25']
+            curves_data = sens_result['curves']
+            tornado_data = sens_result['tornado_data']
+
+            st.markdown('---')
+            st.markdown('<p class="section-header">敏感性曲线</p>', unsafe_allow_html=True)
+
+            line_chart_data = {}
+            for label, curve_info in curves_data.items():
+                change_pcts = [r['concentration_change_pct'] for r in curve_info['curve_results']]
+                line_chart_data[label] = change_pcts
+
+            img_line = viz.sensitivity_line_chart(
+                perturbation_ratios=perturbation_points,
+                sensitivity_data=line_chart_data,
+                title="参数敏感性分析曲线",
+            )
+            st.image(img_line, use_container_width=True)
+
+            col_line_dl1, col_line_dl2 = st.columns([1, 3])
+            with col_line_dl1:
+                st.download_button(
+                    label="📥 下载折线图PNG",
+                    data=img_line.getvalue(),
+                    file_name="敏感性分析折线图.png",
+                    mime="image/png",
+                )
+            with col_line_dl2:
+                if len(tornado_data) > 0:
+                    top_param = tornado_data[0]
+                    slope_val = top_param['avg_slope_per_10pct']
+                    st.info(
+                        f"**分析总结:** 当前最敏感参数为 **{top_param['label']}**，"
+                        f"该参数每增加10%，PM2.5浓度平均变化 **{slope_val:.2f}%**。"
+                    )
+
+            st.markdown('---')
+            st.markdown('<p class="section-header">线性/非线性判断</p>', unsafe_allow_html=True)
+
+            linearity_info = []
+            for t_data in tornado_data:
+                label = t_data['label']
+                slope_abs = abs(t_data['avg_slope_per_10pct']) / 10.0
+                if slope_abs > 1.0:
+                    linearity = "超线性 (斜率绝对值>1)"
+                    linearity_color = "🔴"
+                elif slope_abs < 1.0:
+                    linearity = "亚线性 (斜率绝对值<1)"
+                    linearity_color = "🟡"
+                else:
+                    linearity = "线性 (斜率绝对值≈1)"
+                    linearity_color = "🟢"
+                linearity_info.append({
+                    '参数': label,
+                    '斜率(每1%参数变化)': round(slope_abs, 4),
+                    '每10%浓度变化(%)': round(t_data['avg_slope_per_10pct'], 2),
+                    '线性判断': f"{linearity_color} {linearity}",
+                })
+            if linearity_info:
+                st.dataframe(pd.DataFrame(linearity_info), use_container_width=True)
+            else:
+                st.info("暂无数据")
+
+            st.markdown('---')
+            st.markdown('<p class="section-header">龙卷风图 - 参数敏感性排名</p>', unsafe_allow_html=True)
+
+            if len(tornado_data) > 0:
+                tornado_labels = [t['label'] for t in tornado_data]
+                tornado_magnitudes = [t['impact_magnitude'] for t in tornado_data]
+
+                img_tornado = viz.tornado_chart(
+                    param_labels=tornado_labels,
+                    impact_magnitudes=tornado_magnitudes,
+                    title="参数敏感性龙卷风图 (±50%扰动影响幅度)",
+                )
+                st.image(img_tornado, use_container_width=True)
+
+                col_torn_dl1, _ = st.columns([1, 3])
+                with col_torn_dl1:
+                    st.download_button(
+                        label="📥 下载龙卷风图PNG",
+                        data=img_tornado.getvalue(),
+                        file_name="敏感性分析龙卷风图.png",
+                        mime="image/png",
+                    )
+            else:
+                st.info("暂无龙卷风图数据")
+
+            st.markdown('---')
+            st.markdown('<p class="section-header">详细数据</p>', unsafe_allow_html=True)
+
+            all_detail_rows = []
+            for label, curve_info in curves_data.items():
+                for r in curve_info['curve_results']:
+                    all_detail_rows.append({
+                        '参数组合': label,
+                        '扰动比例(%)': r['perturbation_pct'],
+                        '该行业排放量(吨/年)': round(r['industry_emission'], 4),
+                        '排放量变化(吨/年)': round(r['industry_emission_change'], 4),
+                        '预期PM2.5浓度(μg/m³)': round(r['expected_pm25'], 4),
+                        '浓度相对基准变化(%)': round(r['concentration_change_pct'], 4),
+                    })
+
+            detail_df = pd.DataFrame(all_detail_rows)
+            st.dataframe(detail_df, use_container_width=True)
+
+            csv_detail = detail_df.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(
+                label="📥 下载敏感性分析详细数据CSV",
+                data=csv_detail,
+                file_name="敏感性分析详细数据.csv",
+                mime="text/csv",
+                type="primary",
+            )
+
+            st.markdown('---')
+            st.markdown(f"**基准PM2.5浓度:** {baseline_pm25:.2f} μg/m³")
+
+    with tab5:
         st.markdown('<p class="section-header">数据导出</p>', unsafe_allow_html=True)
         st.info("将排放清单和情景模拟结果导出为CSV格式。")
 

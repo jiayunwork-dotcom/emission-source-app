@@ -821,3 +821,88 @@ class Visualizer:
 
         plt.tight_layout()
         return self._fig_to_bytes(fig)
+
+    def sensitivity_line_chart(
+        self,
+        perturbation_ratios: List[float],
+        sensitivity_data: Dict[str, List[float]],
+        title: str = "敏感性分析曲线",
+        xlabel: str = "参数变化比例 (%)",
+        ylabel: str = "PM2.5浓度变化百分比 (%)",
+    ) -> BytesIO:
+        fig, ax = plt.subplots(figsize=(10, 7))
+
+        curve_labels = list(sensitivity_data.keys())
+        colors = COLORS[:len(curve_labels)]
+
+        for i, (label, change_pcts) in enumerate(sensitivity_data.items()):
+            ax.plot(
+                perturbation_ratios,
+                change_pcts,
+                'o-',
+                label=label,
+                color=colors[i],
+                linewidth=2,
+                markersize=6,
+                alpha=0.9,
+            )
+
+        ax.axvline(x=0, color='red', linestyle='--', linewidth=1.5, alpha=0.8, label='基准点(0%)')
+        ax.axhline(y=0, color='gray', linestyle='-', linewidth=0.8, alpha=0.5)
+
+        ax.set_xlabel(xlabel, fontsize=12)
+        ax.set_ylabel(ylabel, fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.legend(loc='best', fontsize=10)
+        ax.grid(True, alpha=0.3)
+
+        x_ticks = list(range(int(min(perturbation_ratios)), int(max(perturbation_ratios)) + 1, 10))
+        ax.set_xticks(x_ticks)
+        ax.set_xticklabels([f'{t}%' for t in x_ticks])
+
+        plt.tight_layout()
+        return self._fig_to_bytes(fig)
+
+    def tornado_chart(
+        self,
+        param_labels: List[str],
+        impact_magnitudes: List[float],
+        title: str = "参数敏感性龙卷风图",
+        xlabel: str = "PM2.5浓度变化绝对值 (%)",
+    ) -> BytesIO:
+        sorted_indices = np.argsort(impact_magnitudes)
+        sorted_labels = [param_labels[i] for i in sorted_indices]
+        sorted_magnitudes = [impact_magnitudes[i] for i in sorted_indices]
+
+        n_params = len(sorted_labels)
+        fig_height = max(5, n_params * 0.6 + 2)
+        fig, ax = plt.subplots(figsize=(10, fig_height))
+
+        colors = plt.cm.RdYlGn_r(np.linspace(0.2, 0.8, n_params))
+
+        y_pos = np.arange(n_params)
+        bars = ax.barh(y_pos, sorted_magnitudes, color=colors, alpha=0.85, edgecolor='black', linewidth=0.5)
+
+        for bar, mag in zip(bars, sorted_magnitudes):
+            width = bar.get_width()
+            ax.text(
+                width + max(sorted_magnitudes) * 0.01,
+                bar.get_y() + bar.get_height() / 2,
+                f'{mag:.2f}%',
+                va='center',
+                ha='left',
+                fontsize=10,
+                fontweight='bold',
+            )
+
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(sorted_labels, fontsize=10)
+        ax.set_xlabel(xlabel, fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.grid(True, alpha=0.3, axis='x')
+
+        max_val = max(sorted_magnitudes) if sorted_magnitudes else 1
+        ax.set_xlim(0, max_val * 1.25)
+
+        plt.tight_layout()
+        return self._fig_to_bytes(fig)

@@ -211,3 +211,151 @@ class ScenarioSimulationEngine:
 
     def get_scenario(self, scenario_name: str) -> Optional[Scenario]:
         return self.scenarios.get(scenario_name)
+
+    def simulate_single_perturbation(
+        self,
+        industry_name: str,
+        param_type: str,
+        perturbation_pct: float,
+    ) -> Dict:
+        self.update_baseline()
+        baseline_total = sum(self.baseline_emissions.values())
+        if baseline_total <= 0:
+            return None
+
+        scenario_emissions = {}
+        for name, base_activity in self.inventory.industries.items():
+            current_activity = IndustryActivityData(
+                industry_name=base_activity.industry_name,
+                activity_level=base_activity.activity_level,
+                activity_unit=base_activity.activity_unit,
+                control_efficiency=base_activity.control_efficiency,
+                factor_params=base_activity.factor_params.copy(),
+            )
+
+            if name == industry_name:
+                if param_type == "activity_level":
+                    current_activity.activity_level = base_activity.activity_level * (1 + perturbation_pct / 100.0)
+                elif param_type == "control_efficiency":
+                    new_eff = base_activity.control_efficiency * (1 + perturbation_pct / 100.0)
+                    current_activity.control_efficiency = np.clip(new_eff, 0.0, 99.0)
+
+            factor_params = current_activity.factor_params
+            emission_factor = self.inventory.factor_library.calculate_emission_factor(
+                name, **factor_params
+            )
+
+            activity_level = current_activity.activity_level
+            control_efficiency = np.clip(current_activity.control_efficiency / 100.0, 0.0, 0.99)
+
+            unit_conversions = {
+                "燃煤电厂": 10000.0,
+                "机动车": 10000.0,
+                "工地扬尘": 1.0,
+                "生物质燃烧": 10000.0 * 1000.0,
+                "餐饮油烟": 1.0,
+            }
+
+            factor_conversions = {
+                "燃煤电厂": 0.001,
+                "机动车": 0.001,
+                "工地扬尘": 1.0,
+                "生物质燃烧": 0.000001,
+                "餐饮油烟": 0.001,
+            }
+
+            base_activity_val = activity_level * unit_conversions.get(name, 1.0)
+            emission_amount = (base_activity_val * emission_factor *
+                              (1 - control_efficiency) *
+                              factor_conversions.get(name, 1.0))
+
+            scenario_emissions[name] = emission_amount
+
+        baseline_industry_emission = self.baseline_emissions.get(industry_name, 0.0)
+        new_industry_emission = scenario_emissions.get(industry_name, baseline_industry_emission)
+        industry_emission_change = new_industry_emission - baseline_industry_emission
+
+        total_new_emissions = sum(scenario_emissions.values())
+        total_reduction = baseline_total - total_new_emissions
+
+        if baseline_total > 0:
+            theoretical_reduction_ratio = total_reduction / baseline_total
+        else:
+            theoretical_reduction_ratio = 0.0
+
+        actual_reduction_ratio = self._saturation_correction(theoretical_reduction_ratio)
+        actual_reduction = actual_reduction_ratio * self.current_pm25_concentration
+        expected_concentration = self.current_pm25_concentration - actual_reduction
+        concentration_change_pct = (expected_concentration - self.current_pm25_concentration) / self.current_pm25_concentration * 100 if self.current_pm25_concentration > 0 else 0
+
+        return {
+            'perturbation_pct': perturbation_pct,
+            'industry_emission': new_industry_emission,
+            'industry_emission_change': industry_emission_change,
+            'expected_pm25': expected_concentration,
+            'concentration_change_pct': concentration_change_pct,
+        }
+
+    def run_sensitivity_analysis(
+        self,
+        analysis_configs: List[Dict],
+        perturbation_min: float = -50.0,
+        perturbation_max: float = 50.0,
+        perturbation_step: float = 10.0,
+    ) -> Dict:
+        perturbation_points = np.arange(perturbation_min, perturbation_max + perturbation_step / 2, perturbation_step).tolist()
+        perturbation_points = [round(p, 2) for p in perturbation_points]
+
+        results = {}
+        baseline_pm25 = self.current_pm25_concentration
+
+        for config in analysis_configs:
+            industry_name = config['industry_name']
+            param_type = config['param_type']
+            param_label = config.get('label', f"{industry_name}-{param_type}")
+
+            curve_results = []
+            for pct in perturbation_points:
+                single_result = self.simulate_single_perturbation(industry_name, param_type, pct)
+                if single_result:
+                    curve_results.append(single_result)
+
+            results[param_label] = {
+                'industry_name': industry_name,
+                'param_type': param_type,
+                'perturbation_points': perturbation_points,
+                'curve_results': curve_results,
+            }
+
+        tornado_data = []
+        for param_label, data in results.items():
+            curve_results = data['curve_results']
+            if len(curve_results) >= 2:
+                change_pcts = [r['concentration_change_pct'] for r in curve_results]
+                impact_magnitude = abs(max(change_pcts) - min(change_pcts))
+                avg_slope = 0
+                valid_slopes = []
+                for i in range(1, len(curve_results)):
+                    dx = curve_results[i]['perturbation_pct'] - curve_results[i-1]['perturbation_pct']
+                    dy = curve_results[i]['concentration_change_pct'] - curve_results[i-1]['concentration_change_pct']
+                    if dx != 0:
+                        valid_slopes.append(dy / dx)
+                if valid_slopes:
+                    avg_slope = np.mean(valid_slopes)
+
+                tornado_data.append({
+                    'label': param_label,
+                    'impact_magnitude': impact_magnitude,
+                    'avg_slope_per_10pct': avg_slope * 10,
+                    'industry_name': data['industry_name'],
+                    'param_type': data['param_type'],
+                })
+
+        tornado_data.sort(key=lambda x: x['impact_magnitude'], reverse=True)
+
+        return {
+            'perturbation_points': perturbation_points,
+            'baseline_pm25': baseline_pm25,
+            'curves': results,
+            'tornado_data': tornado_data,
+        }
